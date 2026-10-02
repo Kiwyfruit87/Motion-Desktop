@@ -4,3 +4,6 @@ settings.ini
 # 編譯出來的程式：用 build.cmd 自己編譯
 *.exe
 *.pdb
+
+# 發佈到 GitHub Releases 用的 ZIP（不放進 repo）
+release/
