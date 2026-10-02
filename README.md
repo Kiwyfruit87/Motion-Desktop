@@ -1,4 +1,4 @@
-# Motion Desktop（動態桌布）
+# Motion Desktop
 
 **English** | [中文](#中文說明)
 
@@ -110,7 +110,7 @@ H.264 `.mp4` is recommended. `.wmv` works too. HEVC (H.265) requires the HEVC ex
 
 # 中文說明
 
-[English](#motion-desktop動態桌布) | **中文**
+[English](#motion-desktop) | **中文**
 
 把影片設成 Windows 桌布。支援 Windows 10 和 Windows 11（包含 24H2 以後的新桌面結構）。
 
