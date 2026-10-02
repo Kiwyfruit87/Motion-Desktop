@@ -1,0 +1,12 @@
+# 批次檔一定要用 Windows 的換行（CRLF），不然雙擊 build.cmd 會執行失敗
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 其他文字檔交給 git 自動處理換行
+*.cs text
+*.md text
+*.manifest text
+*.txt text
+
+# 字體是二進位檔
+*.ttf binary
