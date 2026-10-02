@@ -164,6 +164,14 @@ namespace VideoWallpaper
         }
     }
 
+    // 介面文字：跟著 Windows 的顯示語言，中文 Windows 用中文，其他語言用英文
+    static class Lang
+    {
+        public static readonly bool Chinese = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "zh";
+        public static string T(string chinese, string english) { return Chinese ? chinese : english; }
+        public static string AppName { get { return T("動態桌布", "Motion Desktop"); } }
+    }
+
     class Settings
     {
         public string VideoPath = "";
@@ -1127,7 +1135,7 @@ namespace VideoWallpaper
                     while (commands.TryDequeue(out command))
                     {
                         try { command(); }
-                        catch (Exception ex) { ReportError("播放引擎發生錯誤：" + ex.Message); }
+                        catch (Exception ex) { ReportError(Lang.T("播放引擎發生錯誤：", "Playback engine error: ") + ex.Message); }
                     }
                     if (stopping) break;
 
@@ -1142,7 +1150,7 @@ namespace VideoWallpaper
                     {
                         lastDeviceCheck = Environment.TickCount;
                         int reason = ((ID3D11Device)deviceObject).GetDeviceRemovedReason();
-                        if (reason != 0) { Lost("顯示卡裝置失效 0x" + reason.ToString("X8")); break; }
+                        if (reason != 0) { Lost(Lang.T("顯示卡裝置失效 0x", "Graphics device lost 0x") + reason.ToString("X8")); break; }
                     }
 
                     if (playing)
@@ -1155,7 +1163,7 @@ namespace VideoWallpaper
             }
             catch (Exception ex)
             {
-                ReportError("無法啟動播放引擎：" + ex.Message);
+                ReportError(Lang.T("無法啟動播放引擎：", "Couldn't start the playback engine: ") + ex.Message);
             }
             finally
             {
@@ -1429,14 +1437,14 @@ namespace VideoWallpaper
                 if (hr < 0)
                 {
                     // 有新畫面卻一直複製失敗（約 2 秒）：多半是顯示卡資源失效，整個重建
-                    if (newFrame && ++transferFailures > 120) { Lost("複製影片畫面一直失敗 0x" + hr.ToString("X8")); return; }
+                    if (newFrame && ++transferFailures > 120) { Lost(Lang.T("複製影片畫面一直失敗 0x", "Copying video frames keeps failing 0x") + hr.ToString("X8")); return; }
                     continue;
                 }
                 transferFailures = 0;
                 if (t.VideoTexture != IntPtr.Zero) copyResource(context, t.BackBuffer, t.VideoTexture);   // 乾淨的影片整張蓋上去，再貼疊圖
                 if (DrawOverlay(t)) redraw = true;   // 歌詞捲動、淡入淡出中：下一次螢幕更新再畫一次
                 hr = t.SwapChain.Present(0, 0);
-                if (hr < 0) { Lost("輸出畫面失敗 0x" + hr.ToString("X8")); return; }
+                if (hr < 0) { Lost(Lang.T("輸出畫面失敗 0x", "Presenting the frame failed 0x") + hr.ToString("X8")); return; }
                 lastHealthyTick = Environment.TickCount;
                 if (hr == 0 && newFrame) presentedFrames++;
             }
@@ -1479,7 +1487,7 @@ namespace VideoWallpaper
                     RequestRedraw();
                     break;
                 case 5:     // ERROR
-                    ReportError("無法播放這個影片（建議使用 H.264 編碼的 .mp4），錯誤碼 0x" + param2.ToString("X8"));
+                    ReportError(Lang.T("無法播放這個影片（建議使用 H.264 編碼的 .mp4），錯誤碼 0x", "Can't play this video (an H.264 .mp4 is recommended), error code 0x") + param2.ToString("X8"));
                     break;
                 case 1012:  // RESOURCELOST
                 case 1014:  // STREAMRENDERINGERROR
@@ -1495,7 +1503,7 @@ namespace VideoWallpaper
 
         static void Check(int hr, string what)
         {
-            if (hr < 0) throw new COMException(what + " 失敗（0x" + hr.ToString("X8") + "）", hr);
+            if (hr < 0) throw new COMException(what + Lang.T(" 失敗（0x", " failed (0x") + hr.ToString("X8") + Lang.T("）", ")"), hr);
         }
 
         void Cleanup()
@@ -2487,7 +2495,7 @@ namespace VideoWallpaper
             Bounds = bounds;
             CreateHandle(new WinForms.CreateParams
             {
-                Caption = "動態桌布鎖定畫面",
+                Caption = Lang.T("動態桌布鎖定畫面", "Motion Desktop lock screen"),
                 X = bounds.X, Y = y, Width = bounds.Width, Height = bounds.Height,
                 Style = unchecked((int)0x80000000),   // WS_POPUP（先不顯示，滑動時才顯示）
                 ExStyle = 0x8 | 0x80,                 // WS_EX_TOPMOST | WS_EX_TOOLWINDOW
@@ -3032,6 +3040,35 @@ namespace VideoWallpaper
     // 點系統匣圖示後彈出的控制面板
     class TrayPanel
     {
+        // 面板上的中文（XAML 裡整個屬性值）在非中文 Windows 換成英文
+        static readonly string[,] XamlEnglish =
+        {
+            { "尚未選擇影片", "No video selected" },
+            { "鎖定畫面", "Lock screen" },
+            { "選擇影片", "Choose video" },
+            { "畫面縮放", "Scaling" },
+            { "填滿", "Fill" },
+            { "完整顯示", "Fit" },
+            { "拉伸", "Stretch" },
+            { "選項", "Options" },
+            { "自動暫停", "Auto-pause" },
+            { "有視窗最大化或全螢幕時暫停，節省資源", "Pause when windows cover the desktop" },
+            { "開機時自動啟動", "Start with Windows" },
+            { "登入 Windows 後自動播放動態桌布", "Start playing when you sign in" },
+            { "工作列透明", "Transparent taskbar" },
+            { "動態桌布", "Motion Desktop" },
+            { "關閉動態桌布，並還原原本的桌布", "Close Motion Desktop and restore your original wallpaper" },
+            { "結束", "Exit" },
+        };
+
+        static string Localize(string xaml)
+        {
+            if (Lang.Chinese) return xaml;
+            for (int i = 0; i < XamlEnglish.GetLength(0); i++)
+                xaml = xaml.Replace("'" + XamlEnglish[i, 0] + "'", "'" + XamlEnglish[i, 1] + "'");   // 只換整個屬性值，不會換到別的字串裡的一部分
+            return xaml;
+        }
+
         const string Xaml = @"
 <Grid xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
       xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
@@ -3362,7 +3399,7 @@ namespace VideoWallpaper
         public TrayPanel(WallpaperApp app)
         {
             this.app = app;
-            root = (Grid)XamlReader.Parse(Xaml);
+            root = (Grid)XamlReader.Parse(Localize(Xaml));
             previewCard = Find<Border>("PreviewCard");
             previewVideo = Find<Grid>("PreviewVideo");
             previewEmpty = Find<FrameworkElement>("PreviewEmpty");
@@ -3425,7 +3462,7 @@ namespace VideoWallpaper
 
             window = new Window
             {
-                Title = "動態桌布",
+                Title = Lang.AppName,
                 Content = root,
                 WindowStyle = WindowStyle.None,
                 ResizeMode = ResizeMode.NoResize,
@@ -3628,17 +3665,17 @@ namespace VideoWallpaper
                 UpdatePreview();
 
                 string status; Color dot;
-                if (app.LastError != null) { status = "無法播放這個影片"; dot = Color.FromRgb(0xFF, 0x6B, 0x6B); }
-                else if (app.UserPaused) { status = "已暫停"; dot = Color.FromRgb(0xA0, 0xA0, 0xA0); }
-                else if (app.AutoPaused) { status = "自動暫停中・有視窗遮住桌面"; dot = Color.FromRgb(0xFF, 0xB9, 0x00); }
-                else { status = "播放中"; dot = Color.FromRgb(0x6C, 0xCB, 0x5F); }
+                if (app.LastError != null) { status = Lang.T("無法播放這個影片", "Can't play this video"); dot = Color.FromRgb(0xFF, 0x6B, 0x6B); }
+                else if (app.UserPaused) { status = Lang.T("已暫停", "Paused"); dot = Color.FromRgb(0xA0, 0xA0, 0xA0); }
+                else if (app.AutoPaused) { status = Lang.T("自動暫停中・有視窗遮住桌面", "Auto-paused · A window covers the desktop"); dot = Color.FromRgb(0xFF, 0xB9, 0x00); }
+                else { status = Lang.T("播放中", "Playing"); dot = Color.FromRgb(0x6C, 0xCB, 0x5F); }
                 statusText.Text = status;
                 statusDot.Fill = new SolidColorBrush(dot);
 
                 playIcon.Text = app.UserPaused ? "" : "";
-                playButton.ToolTip = app.UserPaused ? "播放" : "暫停";
+                playButton.ToolTip = app.UserPaused ? Lang.T("播放", "Play") : Lang.T("暫停", "Pause");
                 muteIcon.Text = app.Muted ? "" : "";
-                muteButton.ToolTip = app.Muted ? "取消靜音" : "靜音";
+                muteButton.ToolTip = app.Muted ? Lang.T("取消靜音", "Unmute") : Lang.T("靜音", "Mute");
                 playButton.IsEnabled = has;
                 muteButton.IsEnabled = has;
 
@@ -3647,16 +3684,16 @@ namespace VideoWallpaper
                 stretchStretch.IsChecked = app.Stretch == Stretch.Fill;
                 MoveThumb(open && window.IsVisible && shownStretch.HasValue && shownStretch.Value != app.Stretch);
                 shownStretch = app.Stretch;
-                stretchHint.Text = app.Stretch == Stretch.Uniform ? "完整顯示整個畫面，比例不同時會有黑邊"
-                                 : app.Stretch == Stretch.Fill ? "拉伸到跟螢幕一樣大，比例可能變形"
-                                 : "填滿整個螢幕，比例不同時會裁掉邊緣";
+                stretchHint.Text = app.Stretch == Stretch.Uniform ? Lang.T("完整顯示整個畫面，比例不同時會有黑邊", "Shows the whole video; may add black bars")
+                                 : app.Stretch == Stretch.Fill ? Lang.T("拉伸到跟螢幕一樣大，比例可能變形", "Stretches to the screen; may look distorted")
+                                 : Lang.T("填滿整個螢幕，比例不同時會裁掉邊緣", "Fills the screen; may crop the edges");
 
                 autoPauseToggle.IsChecked = app.AutoPause;
                 startupToggle.IsChecked = WallpaperApp.IsStartupEnabled();
                 taskbarToggle.IsChecked = app.TaskbarFixEnabled;
                 taskbarHint.Text = TaskbarFix.TranslucentTBRunning
-                    ? "搭配 TranslucentTB：開機時提早啟動它，工作列變黑時自動修正"
-                    : "需要開著 TranslucentTB 才有作用（Microsoft Store 免費下載）";
+                    ? Lang.T("搭配 TranslucentTB：開機時提早啟動它，工作列變黑時自動修正", "Works with TranslucentTB: starts it early and fixes a black taskbar")
+                    : Lang.T("需要開著 TranslucentTB 才有作用（Microsoft Store 免費下載）", "Requires TranslucentTB to be running (free on the Microsoft Store)");
             }
             finally { refreshing = false; }
         }
@@ -3909,7 +3946,7 @@ namespace VideoWallpaper
         {
             if (engine == null)
             {
-                tray.ShowBalloonTip(5000, "動態桌布", "要先選一段影片，才能開啟鎖定畫面。", WinForms.ToolTipIcon.Info);
+                tray.ShowBalloonTip(5000, Lang.AppName, Lang.T("要先選一段影片，才能開啟鎖定畫面。", "Choose a video first to open the lock screen."), WinForms.ToolTipIcon.Info);
                 return;
             }
             lockScreen.Open(engine);
@@ -3976,8 +4013,9 @@ namespace VideoWallpaper
             {
                 using (var dlg = new WinForms.OpenFileDialog())
                 {
-                    dlg.Title = "選擇要當桌布的影片";
-                    dlg.Filter = "影片檔 (*.mp4;*.wmv;*.mov;*.m4v;*.avi;*.mkv;*.webm)|*.mp4;*.wmv;*.mov;*.m4v;*.avi;*.mkv;*.webm|所有檔案 (*.*)|*.*";
+                    dlg.Title = Lang.T("選擇要當桌布的影片", "Choose a video for your wallpaper");
+                    dlg.Filter = Lang.T("影片檔", "Video files") + " (*.mp4;*.wmv;*.mov;*.m4v;*.avi;*.mkv;*.webm)|*.mp4;*.wmv;*.mov;*.m4v;*.avi;*.mkv;*.webm|"
+                        + Lang.T("所有檔案", "All files") + " (*.*)|*.*";
                     dlg.InitialDirectory = HasVideo
                         ? Path.GetDirectoryName(settings.VideoPath)
                         : Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
@@ -4079,7 +4117,7 @@ namespace VideoWallpaper
             return
 @"<?xml version=""1.0"" encoding=""UTF-16""?>
 <Task version=""1.2"" xmlns=""http://schemas.microsoft.com/windows/2004/02/mit/task"">
-  <RegistrationInfo><Description>登入 Windows 後啟動動態桌布</Description></RegistrationInfo>
+  <RegistrationInfo><Description>" + System.Security.SecurityElement.Escape(Lang.T("登入 Windows 後啟動動態桌布", "Starts Motion Desktop when you sign in to Windows")) + @"</Description></RegistrationInfo>
   <Triggers>
     <LogonTrigger><Enabled>true</Enabled><UserId>" + user + @"</UserId></LogonTrigger>
   </Triggers>
@@ -4104,7 +4142,7 @@ namespace VideoWallpaper
 
         void RefreshTray()
         {
-            string tip = "動態桌布 - " + (HasVideo ? Path.GetFileName(settings.VideoPath) : "尚未選擇影片");
+            string tip = Lang.AppName + " - " + (HasVideo ? Path.GetFileName(settings.VideoPath) : Lang.T("尚未選擇影片", "No video selected"));
             if (tip.Length > 63) tip = tip.Substring(0, 60) + "...";   // NotifyIcon.Text 上限 63 字
             tray.Text = tip;
         }
@@ -4125,7 +4163,7 @@ namespace VideoWallpaper
             foreach (var screen in WinForms.Screen.AllScreens)
             {
                 try { players.Add(CreatePlayer(screen)); }
-                catch (Exception ex) { ShowError("建立播放視窗失敗：" + ex.Message); }
+                catch (Exception ex) { ShowError(Lang.T("建立播放視窗失敗：", "Failed to create the playback window: ") + ex.Message); }
             }
             if (players.Count == 0) return;
 
@@ -4426,7 +4464,7 @@ namespace VideoWallpaper
 
         void ShowError(string message)
         {
-            tray.ShowBalloonTip(8000, "動態桌布", message, WinForms.ToolTipIcon.Warning);
+            tray.ShowBalloonTip(8000, Lang.AppName, message, WinForms.ToolTipIcon.Warning);
         }
 
         // 舊版結構下 WorkerW 可能殘留最後一格畫面，重設一次目前的桌布讓它重畫

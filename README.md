@@ -1,6 +1,125 @@
-# 動態桌布 VideoWallpaper
+# Motion Desktop（動態桌布）
+
+**English** | [中文](#中文說明)
+
+Set a video as your Windows desktop wallpaper. Works on Windows 10 and Windows 11 (including the new desktop structure in 24H2 and later).
+
+## Download
+
+Download `MotionDesktop-vX.X.X.zip` from [Releases](https://github.com/Kiwyfruit87/Motion-Desktop/releases), unzip it, and double-click `VideoWallpaper.exe`.
+Keep the `fonts` folder next to the exe (it holds the lock screen clock font).
+
+The exe is not digitally signed, so Windows SmartScreen or your antivirus may show a warning. Choose "Run anyway", or build it yourself from source (see below).
+
+## Build
+
+Nothing to install: double-click `build.cmd`. It uses the C# compiler that ships with Windows (.NET Framework 4.x)
+and creates `VideoWallpaper.exe` in the same folder.
+
+## Usage
+
+1. Double-click `VideoWallpaper.exe`. On first launch it asks you to pick a video.
+2. After that, click the tray icon (a blue-purple play button, left or right click) to open the control panel:
+   - Video preview (shown with the current scaling mode) and playback status
+   - Play / pause, mute, choose video
+   - Scaling: Fill, Fit, Stretch
+   - Auto-pause: pause when a window is maximized or full screen (on by default, saves power)
+   - Start with Windows
+   - Transparent taskbar (works with TranslucentTB, see below)
+   - Exit (restores your original wallpaper)
+3. If the program is already running, double-clicking the exe again also opens the control panel.
+4. The panel follows Windows dark / light mode and your accent color. Click outside it or press Esc to close it.
+5. The interface language follows Windows: Chinese on Chinese Windows, English on everything else.
+
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `VideoWallpaper.cs` | Source code |
+| `app.manifest` | Declares DPI awareness and supported Windows versions (needed on 24H2) |
+| `build.cmd` | Double-click to build `VideoWallpaper.exe` |
+| `VideoWallpaper.exe` | The program (appears after building) |
+| `settings.ini` | Created automatically; stores the current video and options |
+| `fonts\` | Lock screen clock font and its license |
+
+Settings are stored next to the exe, not on drive C. The only exception: when "Start with Windows" is on,
+a logon task named "VideoWallpaper" is added to Windows Task Scheduler (it starts much earlier than the registry startup list).
+Turning the option off removes it. Only if creating the task fails does it fall back to `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+
+## Lock screen (ChromeOS style)
+
+- The lock button in the control panel slides the whole screen down from the top and plays the video full screen,
+  with a clock (12-hour, with AM / PM) and the current weather (°C) in the bottom-left corner.
+- Press Space (or Enter, Esc) or click the mouse: the screen slides up and you're back on the desktop.
+- Switching to another app (Alt+Tab, Win key) or pressing Alt+F4 also slides it away.
+- This is a full-screen view that *looks like* a lock screen. It does not ask for a password; use Win+L to actually lock your PC.
+- While Spotify is playing, a frosted-glass music card appears in the bottom-right corner (the video behind it is blurred in real time):
+  album art on the left, song title and artist on the right,
+  with previous / play-pause / next buttons below (clicking them doesn't dismiss the lock screen). The card has equal margins to the right and bottom edges.
+  When the song changes, the card content turns like a page: the old page slides out to the left while the new one slides in from the right,
+  with a constant gap between them. Going back to the previous song reverses the direction.
+  The data comes from Windows "System Media Transport Controls" (the same info shown in the volume flyout) and updates every second while the lock screen is open.
+- The **tilted microphone button** at the bottom-right of the card toggles lyrics (bright white when showing, half-bright when available but off,
+  and it fades smoothly when its state changes). Click it and lyrics fade in above the card: the current line is brightest,
+  lines farther away get dimmer, and it scrolls smoothly with playback. Click again to fade it out.
+  Lyrics stay on when the song changes; closing the lock screen turns them off, so they won't appear next time until you click the microphone again.
+  - As soon as lyrics are found, the whole song is pre-rendered in the background; scrolling and fading are drawn by the playback engine at the display's refresh rate, so they stay smooth.
+  - Lyrics come from [LRCLIB](https://lrclib.net) (a free, public, community lyrics database). The song title, artist, album and duration are sent to look them up.
+  - When no lyrics are found, or for instrumentals and podcasts, the button is dimmed and does nothing.
+  - Time-synced lyrics follow the singing precisely. Plain lyrics (without timestamps) scroll evenly over the song's length without highlighting a line.
+- The mouse cursor only appears when you move the mouse and hides after 2.5 seconds.
+- The clock font is Google Sans Flex (in the `fonts` folder, SIL Open Font License, see `fonts\OFL.txt`).
+- Weather: the rough location is found from your IP address with ipapi.co (fallback: ipwho.is), then the weather comes from Open-Meteo, updated at most every 20 minutes.
+  To set a location instead of using your IP, add a line `weatherlocation=latitude,longitude` to `settings.ini` (for example `weatherlocation=22.99,120.21`).
+
+## Transparent taskbar (with TranslucentTB)
+
+- Making the taskbar transparent is done by [TranslucentTB](https://github.com/TranslucentTB/TranslucentTB) (free on the Microsoft Store).
+  Keep it running and set its state to "Clear".
+- On recent Windows 11 builds (24H2, 25H2), the taskbar often turns completely **black** after TranslucentTB sets it to clear:
+  TranslucentTB has already removed the taskbar background, but Explorer's composition state didn't update, so the black layer underneath shows through.
+- When the "Transparent taskbar" option is on (default), this program checks the top row of taskbar pixels every 2 seconds and after window switches.
+  If it is almost entirely pure black, it sends a `WM_DWMCOMPOSITIONCHANGED` message asking Explorer to reapply its look, and the taskbar is transparent again within about a second.
+  No system or TranslucentTB settings are changed, and nothing flickers when the taskbar is already transparent.
+- It doesn't read the screen while a full-screen app (game, video) covers the taskbar, to avoid affecting performance.
+- **Starts TranslucentTB early**: TranslucentTB's own autostart sits in Windows' startup-apps queue and often takes several minutes.
+  Motion Desktop starts right at logon, so when the option is on it also launches TranslucentTB when it starts (about 2 seconds).
+  This happens only once at startup: if you close TranslucentTB later, Motion Desktop won't reopen it.
+  Launching TranslucentTB while it's already running does nothing, so you can keep its own autostart enabled.
+
+## How it works
+
+- Videos are decoded with Windows' built-in Media Foundation engine (GPU hardware acceleration) and drawn to the wallpaper with Direct3D 11.
+- Multiple monitors share one decoder; each monitor is scaled separately.
+- On the lock screen, the clock, now-playing card and lyrics are drawn onto the video on the GPU with Direct2D (falls back to GDI if Direct2D isn't available).
+- Monitors covered by windows aren't drawn. When all monitors are covered, playback is paused manually, the PC is locked / asleep, or the display is off, the whole engine pauses.
+- The program checks itself: if engine output fails, the graphics driver resets, or the picture isn't actually moving after unlocking, it rebuilds the playback engine.
+
+## Video formats
+
+H.264 `.mp4` is recommended. `.wmv` works too. HEVC (H.265) requires the HEVC extension to be installed;
+`.mkv` and `.webm` may not play. If a video can't be played, a tray notification appears.
+
+## License
+
+- Code: [MIT License](LICENSE).
+- Font Google Sans Flex: SIL Open Font License 1.1, see [`fonts/OFL.txt`](fonts/OFL.txt).
+- Lyrics are not included in this project; they are looked up from [LRCLIB](https://lrclib.net) at runtime.
+
+---
+
+# 中文說明
+
+[English](#motion-desktop動態桌布) | **中文**
 
 把影片設成 Windows 桌布。支援 Windows 10 和 Windows 11（包含 24H2 以後的新桌面結構）。
+
+## 下載
+
+到 [Releases](https://github.com/Kiwyfruit87/Motion-Desktop/releases) 下載 `MotionDesktop-vX.X.X.zip`，解壓縮後雙擊 `VideoWallpaper.exe`。
+`fonts` 資料夾要跟 exe 放在一起（鎖定畫面時鐘用的字體）。
+
+這個 exe 沒有數位簽章，Windows SmartScreen 或防毒軟體可能會跳出警告，選「仍要執行」即可；也可以照下面的方式自己編譯。
 
 ## 編譯
 
@@ -20,6 +139,7 @@
    - 結束（還原原本的桌布）
 3. 程式已經在執行時，再雙擊一次 exe 也會打開控制面板。
 4. 面板會跟著 Windows 的深色 / 淺色模式與強調色變化；點面板外面或按 Esc 就會收起來。
+5. 介面語言跟著 Windows：中文 Windows 顯示中文，其他語言顯示英文。
 
 ## 檔案說明
 

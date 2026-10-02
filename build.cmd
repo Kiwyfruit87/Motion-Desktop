@@ -9,5 +9,5 @@ set WPF=%FW%\WPF
   /r:"%WPF%\PresentationFramework.dll" /r:"%WPF%\PresentationCore.dll" /r:"%WPF%\WindowsBase.dll" ^
   /r:System.Xaml.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll ^
   "%~dp0VideoWallpaper.cs"
-if errorlevel 1 (echo 編譯失敗 & exit /b 1)
-echo 編譯完成：%~dp0VideoWallpaper.exe
+if errorlevel 1 (echo 編譯失敗 / Build failed & exit /b 1)
+echo 編譯完成 / Build succeeded: %~dp0VideoWallpaper.exe
