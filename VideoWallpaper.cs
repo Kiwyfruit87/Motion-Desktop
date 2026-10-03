@@ -847,7 +847,7 @@ namespace VideoWallpaper
             public long FadeStart;
             public int FadeMs;
             public bool RemoveWhenFaded;
-            public int Z;   // 疊的順序：數字小的先畫（卡片背景 0、封面和文字 1、歌詞 2）
+            public int Z;   // 疊的順序：數字小的先畫（卡片的毛玻璃 0、卡片的顏色 1、封面文字和按鈕 2、歌詞 3）
             // 左右滑動（換歌時封面和文字的翻頁動畫），只在 Clip 範圍內看得到
             public double MoveFrom, MoveTo;
             public long MoveStart;
@@ -958,6 +958,37 @@ namespace VideoWallpaper
             });
         }
 
+        // 淡入換圖（音樂卡片的顏色）：新的從看不到慢慢變清楚，舊的同時淡出、淡完拿掉；fadeMs = 0 直接換。pixels 是 null 就拿掉
+        int fadeSerial;
+        public void SetFadeOverlay(IntPtr hwnd, string name, int[] pixels, int width, int height, int x, int y, int z, int fadeMs)
+        {
+            Post(delegate
+            {
+                var t = targets.Find(o => o.Hwnd == hwnd);
+                if (t == null || !t.CanOverlay) return;
+                long now = clock.ElapsedMilliseconds;
+                Overlay old;
+                if (t.Overlays.TryGetValue(name, out old))
+                {
+                    t.Overlays.Remove(name);
+                    if (fadeMs > 0)
+                    {
+                        old.FadeFrom = Animated(old.FadeFrom, old.FadeTo, old.FadeStart, old.FadeMs, now);
+                        old.FadeTo = 0; old.FadeStart = now; old.FadeMs = fadeMs;
+                        old.RemoveWhenFaded = true;
+                        t.Overlays[name + "#" + (++fadeSerial)] = old;
+                    }
+                    else ReleaseOverlay(old);
+                }
+                redraw = true;
+                if (pixels == null) return;
+                var o2 = CreateOverlay(t, pixels, width, height, x, y);
+                o2.Z = z;
+                if (fadeMs > 0) { o2.FadeFrom = 0; o2.FadeTo = 1; o2.FadeStart = now; o2.FadeMs = fadeMs; }
+                t.Overlays[name] = o2;
+            });
+        }
+
         // 底下帶毛玻璃的疊圖（音樂卡片）：(glassX, glassY, glassW, glassH) 這塊圓角長方形裡的影片會先糊掉
         public void SetGlassOverlay(IntPtr hwnd, string name, int[] pixels, int width, int height, int x, int y,
             int glassX, int glassY, int glassW, int glassH, double radius)
@@ -987,7 +1018,7 @@ namespace VideoWallpaper
                 var t = targets.Find(o => o.Hwnd == hwnd);
                 if (t == null || !t.CanOverlay) return;
                 var o2 = CreateOverlay(t, pixels, width, height, x, y);
-                o2.Z = 2;
+                o2.Z = 3;
                 o2.ViewH = viewH;
                 o2.Mask = mask;
                 o2.ScrollFrom = o2.ScrollTo = scroll;
@@ -1732,14 +1763,16 @@ namespace VideoWallpaper
         }
     }
 
-    // Spotify 正在播放的歌：透過 Windows 的「系統媒體控制」讀取（跟音量浮動視窗上的歌名是同一份資料）。
+    // 正在播放的歌（Spotify、瀏覽器裡的 YouTube Music 等）：透過 Windows 的「系統媒體控制」讀取（跟音量浮動視窗上的歌名是同一份資料）。
     // 這些是 WinRT 介面，這裡用的舊版 C# 編譯器沒辦法直接引用（要另外裝 Windows SDK），所以執行時才用反射呼叫。
     static class NowPlaying
     {
         public class Track
         {
             public string Title, Artist, Album, Key;
+            public string App;       // 哪個程式在播（Windows 的應用程式識別碼，例如 Spotify、Chrome）
             public bool Playing;
+            public bool IsSpotify { get { return App != null && App.IndexOf("spotify", StringComparison.OrdinalIgnoreCase) >= 0; } }
             public byte[] Art;   // 專輯封面圖檔
             public TimeSpan Position, Duration;   // Spotify 回報的播放位置、歌曲長度
             public DateTime Updated;              // 回報位置的時間（UTC）
@@ -1766,7 +1799,7 @@ namespace VideoWallpaper
         static System.Threading.Timer timer;
         static Action changed;
         static int polling, artTries;
-        static string artKey;
+        static string artKey, shownApp;
         static byte[] artCache;
 
         // 開始每秒讀一次；有變化時在 UI 執行緒呼叫 onChanged
@@ -1815,13 +1848,29 @@ namespace VideoWallpaper
             {
                 if (!Init()) return;
                 Type rt;
+                // 選要顯示哪個播放器（Spotify、瀏覽器裡的 YouTube Music…）：正在播放的優先；
+                // 上次顯示的那個還在播就繼續顯示它（同時開好幾個時才不會跳來跳去）；都沒在播就用 Windows 認定的「目前」那個
+                string currentApp = null;
+                try
+                {
+                    object currentSession = Call(manager, managerType, "GetCurrentSession", out rt);
+                    if (currentSession != null) currentApp = Get(currentSession, sessionType, "SourceAppUserModelId") as string;
+                }
+                catch { }
                 object found = null;
+                string foundApp = null;
+                int best = -1;
                 foreach (object s in (IEnumerable)Call(manager, managerType, "GetSessions", out rt))
                 {
                     string app = Get(s, sessionType, "SourceAppUserModelId") as string ?? "";
-                    if (app.IndexOf("spotify", StringComparison.OrdinalIgnoreCase) >= 0) { found = s; break; }
+                    bool playing = false;
+                    try { playing = Get(Call(s, sessionType, "GetPlaybackInfo", out rt), infoType, "PlaybackStatus").ToString() == "Playing"; }
+                    catch { }
+                    int score = (playing ? 4 : 0) + (app == shownApp ? 2 : 0) + (app == currentApp ? 1 : 0);
+                    if (score > best) { best = score; found = s; foundApp = app; }
                 }
                 session = found;
+                shownApp = foundApp;
 
                 Track track = null;
                 if (found != null)
@@ -1845,7 +1894,8 @@ namespace VideoWallpaper
                         track = new Track
                         {
                             Title = title, Artist = artist, Album = Get(props, propsType, "AlbumTitle") as string ?? "", Playing = playing, Art = artCache,
-                            Key = songKey + "\n" + playing + "\n" + (artCache == null ? 0 : artCache.Length),
+                            App = foundApp,
+                            Key = songKey + "\n" + playing + "\n" + (artCache == null ? 0 : artCache.Length) + "\n" + foundApp,
                         };
                         try
                         {
@@ -2319,16 +2369,23 @@ namespace VideoWallpaper
     // 左下角的時鐘和天氣：用 WPF 畫成一張半透明圖，再交給播放引擎每格貼到影片上
     static class LockClock
     {
-        // 跟 ChromeOS 一樣用 Google Sans（fonts 資料夾裡的 Google Sans Flex，開源授權），沒有的話退回 Segoe UI
-        // 中文歌名會用到的字，Google Sans 沒有，就自動改用微軟正黑體
+        // 跟 ChromeOS 一樣用 Google Sans（fonts 資料夾裡的 Google Sans Flex，開源授權；拉丁字母含各種帶符號的字母都有）。
+        // Google Sans 沒有的字依序找：俄文、希臘文用 Segoe UI（有真的半粗體，粗細才跟旁邊的字一致），
+        // 中文和日文假名用微軟正黑體，韓文用 Malgun Gothic
         static readonly FontFamily ClockFont = new FontFamily(
-            new Uri(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fonts") + "\\"), "./#Google Sans Flex, Microsoft JhengHei UI, Segoe UI");
+            new Uri(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fonts") + "\\"), "./#Google Sans Flex, Segoe UI, Microsoft JhengHei UI, Malgun Gothic");
         static readonly FontFamily IconFont = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets");
 
         // 時間或天氣有變才需要重畫時鐘那張圖
         public static string ClockKey()
         {
-            return TimeText() + AmPmText() + (Weather.Current == null ? "" : Weather.Current.Fetched.Ticks.ToString());
+            return TimeText() + AmPmText() + DateText() + (Weather.Current == null ? "" : Weather.Current.Fetched.Ticks.ToString());
+        }
+
+        // 時間下面的日期（英文）：「Friday, October 3」
+        static string DateText()
+        {
+            return DateTime.Now.ToString("dddd, MMMM d", CultureInfo.InvariantCulture);
         }
 
         // 12 小時制：「9:02」＋ 後面小一號的「AM / PM」
@@ -2342,7 +2399,7 @@ namespace VideoWallpaper
             return DateTime.Now.Hour < 12 ? "AM" : "PM";
         }
 
-        // 左下角：時鐘和天氣
+        // 左下角：時鐘和天氣，下面一行日期
         public static int[] RenderClock(int screenHeight, out int width, out int height, out int x, out int y)
         {
             double s = screenHeight / 1080.0;
@@ -2366,8 +2423,19 @@ namespace VideoWallpaper
                 text.Inlines.Add(new InlineUIContainer(icon) { BaselineAlignment = BaselineAlignment.Baseline });
                 text.Inlines.Add(new Run(Math.Round(weather.TempC).ToString("0", CultureInfo.InvariantCulture) + "°") { FontSize = tempSize });
             }
+            // 時間下面一行小字的日期（大數字的行高下面留很多空，往上拉近一點）
+            var date = new TextBlock
+            {
+                Text = DateText(), FontFamily = ClockFont, FontSize = Math.Round(26 * s), FontWeight = FontWeights.Medium,
+                Foreground = new SolidColorBrush(Color.FromArgb(0xE6, 255, 255, 255)),
+                Margin = new Thickness(Math.Round(4 * s), -Math.Round(12 * s), 0, 0),
+            };
+            TextOptions.SetTextFormattingMode(date, TextFormattingMode.Ideal);
+            var lines = new StackPanel();
+            lines.Children.Add(text);
+            lines.Children.Add(date);
             Border root;
-            var pixels = ToPixels(text, s, pad, out root, out width, out height);
+            var pixels = ToPixels(lines, s, pad, out root, out width, out height);
             x = (int)Math.Round(64 * s - pad);                       // 左下角
             y = (int)Math.Round(screenHeight - 52 * s - height + pad);
             return pixels;
@@ -2389,6 +2457,8 @@ namespace VideoWallpaper
             public int[] Mic;      // 歌詞按鈕（全亮畫好，亮度交給播放引擎慢慢調）
             public int[] Volume;   // 喇叭（音量變了只重畫這張和 VolumeBar）
             public int[] VolumeBar;   // 音量滑桿（平常收起來，滑鼠停在喇叭上才展開）
+            public int[] Color;       // 跟著專輯封面的漸層顏色（疊在毛玻璃上）；封面幾乎是黑白的、沒有封面時是 null
+            public string ColorKey;   // 顏色有沒有變（換歌時顏色變了才淡入淡出）
             public int Width, Height, X, Y;
             public double TrackLeft, TrackWidth;   // 音量滑桿在螢幕上的左端和長度（點或拖曳時換算成音量）
             public int RevealX, RevealW;           // 音量滑桿在圖上的範圍（展開動畫從左邊長出來）
@@ -2404,7 +2474,7 @@ namespace VideoWallpaper
         static VolumeControl cardVolume;
         static int cardWidth, cardHeight;
 
-        // 右下角：Spotify 正在播放的歌（沒在播就回傳 null）。
+        // 右下角：正在播放的歌（沒在播就回傳 null）。
         // buttons：回傳各個按鈕在螢幕上的位置，讓鎖定畫面知道滑鼠點到哪個；volume：Spotify 現在的音量（0～1）
         public static MusicCard RenderMusic(int screenWidth, int screenHeight, double volume, List<KeyValuePair<Rect, string>> buttons)
         {
@@ -2420,7 +2490,15 @@ namespace VideoWallpaper
             VolumeControl volumeControl;
             Border root;
             var card = new MusicCard();
-            Wrap(BuildNowPlaying(track, s, controls, infoParts, chromeParts, out micPart, out volumeControl), s, pad, out root, out card.Width, out card.Height);
+            var content = BuildNowPlaying(track, s, controls, infoParts, chromeParts, out micPart, out volumeControl);
+            Wrap(content, s, pad, out root, out card.Width, out card.Height);
+            // 跟著專輯封面的漸層顏色（另外畫，不加陰影，免得卡片外面多一圈影子）
+            var hues = AlbumHues(track.Art);
+            if (hues != null)
+            {
+                card.Color = RenderCardColor(hues, card.Width, card.Height, pad, content.ActualWidth, content.ActualHeight, s);
+                card.ColorKey = string.Join(",", hues.Select(v => v.ToString("0.000", CultureInfo.InvariantCulture)));
+            }
             // 離右邊和下面一樣是 52（下緣跟左下角的時鐘對齊）
             card.X = (int)Math.Round(screenWidth - 52 * s - card.Width + pad);
             card.Y = (int)Math.Round(screenHeight - 52 * s - card.Height + pad);
@@ -2531,6 +2609,9 @@ namespace VideoWallpaper
             return block;
         }
 
+        // 整體的不透明度：目前這行也是半透明的 8 成，其他行照比例更淡
+        const double LyricsOpacity = 0.8;
+
         // 歌詞露出那一段每一列的亮度：正中間（目前這行）最亮，往上下越來越淡，到邊緣完全消失。
         // highlight = false：一般歌詞沒有時間標記，不強調哪一行，中間一段一樣亮
         public static float[] LyricsMask(int viewHeight, double spacing, bool highlight)
@@ -2541,7 +2622,7 @@ namespace VideoWallpaper
                 double lines = Math.Abs(row + 1 - viewHeight / 2.0) / spacing;          // 離中間幾行
                 double edge = Math.Min(1, Math.Min(row, viewHeight - 1 - row) / (spacing * 0.8));   // 靠近邊緣再淡出
                 double level = highlight ? Fade(lines) : 0.75 * Math.Max(0, Math.Min(1, (3 - lines) / 1.5));
-                mask[row] = (float)(level * edge);
+                mask[row] = (float)(level * edge * LyricsOpacity);
             }
             return mask;
         }
@@ -2640,6 +2721,160 @@ namespace VideoWallpaper
             card.Children.Add(new Border { Child = row, Padding = new Thickness(CardPadding(s) + 1) });   // +1：邊框的寬度
             chrome.Add(tint); chrome.Add(shine); chrome.Add(grain); chrome.Add(edge);
             return card;
+        }
+
+        // ---------- 卡片顏色（跟著專輯封面）----------
+        // 封面縮小後依色相統計（越鮮豔、越亮的點越算數，接近黑、白、灰的不算），找出最多的色相，
+        // 再找第二個顏色：有明顯的另一個色系（差 60° 以上）就用它，不然用旁邊 20°～50° 的相近色相。
+        // 回傳 {主色相, 主飽和度, 第二色相, 第二飽和度, 是不是兩個色系（1 / 0）}；封面幾乎是黑白的就回傳 null
+        static byte[] huesArt;
+        static double[] huesCache;
+        static double[] AlbumHues(byte[] art)
+        {
+            if (art == null) return null;
+            if (art == huesArt) return huesCache;
+            double[] result = null;
+            try
+            {
+                var image = new BitmapImage();
+                image.BeginInit();
+                image.StreamSource = new MemoryStream(art);
+                image.CacheOption = BitmapCacheOption.OnLoad;
+                image.DecodePixelWidth = 48;
+                image.EndInit();
+                var bgra = new FormatConvertedBitmap(image, PixelFormats.Bgra32, null, 0);
+                int w = bgra.PixelWidth, h = bgra.PixelHeight;
+                var pixels = new int[w * h];
+                bgra.CopyPixels(pixels, w * 4, 0);
+
+                const int bins = 36;   // 每 10° 一格
+                var weight = new double[bins];
+                var cosSum = new double[bins];
+                var sinSum = new double[bins];
+                var satSum = new double[bins];
+                double total = 0;
+                foreach (int p in pixels)
+                {
+                    double r = ((p >> 16) & 255) / 255.0, g = ((p >> 8) & 255) / 255.0, b = (p & 255) / 255.0;
+                    double max = Math.Max(r, Math.Max(g, b)), min = Math.Min(r, Math.Min(g, b)), d = max - min;
+                    double sat = max <= 0 ? 0 : d / max;
+                    if (sat < 0.18 || max < 0.18) continue;
+                    double hue = max == r ? 60 * ((g - b) / d) : max == g ? 60 * ((b - r) / d + 2) : 60 * ((r - g) / d + 4);
+                    if (hue < 0) hue += 360;
+                    double wgt = sat * max;
+                    int bin = Math.Min(bins - 1, (int)(hue / 10));
+                    weight[bin] += wgt;
+                    cosSum[bin] += wgt * Math.Cos(hue * Math.PI / 180);
+                    sinSum[bin] += wgt * Math.Sin(hue * Math.PI / 180);
+                    satSum[bin] += wgt * sat;
+                    total += wgt;
+                }
+                if (total / pixels.Length >= 0.05)
+                {
+                    // 相鄰的格子一起算，找最多的那一段
+                    Func<int, double> around = i => weight[(i + bins - 1) % bins] * 0.5 + weight[i] + weight[(i + 1) % bins] * 0.5;
+                    int peak = 0;
+                    for (int i = 1; i < bins; i++) if (around(i) > around(peak)) peak = i;
+                    // 另一個色系：離主色相 60° 以上、份量至少有主色的四分之一（例如藍色封面上的黃字）
+                    int other = -1;
+                    for (int i = 0; i < bins; i++)
+                    {
+                        int distance = Math.Min(Math.Abs(i - peak), bins - Math.Abs(i - peak));
+                        if (distance >= 6 && (other < 0 || around(i) > around(other))) other = i;
+                    }
+                    bool two = other >= 0 && around(other) >= 0.25 * around(peak);
+                    // 沒有另一個色系的話，找第二多的相近色相：離主色相 2～5 格（20°～50°）
+                    int near = -1;
+                    for (int k = 2; k <= 5; k++)
+                        foreach (int i in new[] { (peak + k) % bins, (peak - k + bins) % bins })
+                            if (near < 0 || around(i) > around(near)) near = i;
+                    Func<int, double[]> mean = c =>
+                    {
+                        double cx = 0, sy = 0, ss = 0, ww = 0;
+                        for (int j = -1; j <= 1; j++) { int i = (c + j + bins) % bins; cx += cosSum[i]; sy += sinSum[i]; ss += satSum[i]; ww += weight[i]; }
+                        double hue = Math.Atan2(sy, cx) * 180 / Math.PI;
+                        return new[] { hue < 0 ? hue + 360 : hue, ww > 0 ? ss / ww : 0.5 };
+                    };
+                    var main = mean(peak);
+                    // 封面上沒有明顯的第二個顏色：自己往旁邊偏 28° 配一個
+                    var second = two ? mean(other) : around(near) >= 0.2 * around(peak) ? mean(near) : new[] { (main[0] + 28) % 360, main[1] };
+                    result = new[] { main[0], main[1], second[0], second[1], two ? 1.0 : 0.0 };
+                }
+            }
+            catch { result = null; }
+            huesArt = art;
+            huesCache = result;
+            return result;
+        }
+
+        // 色相、飽和度、亮度（HSL）→ 顏色
+        static Color Hsl(double hue, double sat, double light, byte alpha)
+        {
+            hue = ((hue % 360) + 360) % 360;
+            double c = (1 - Math.Abs(2 * light - 1)) * sat, x = c * (1 - Math.Abs(hue / 60 % 2 - 1)), m = light - c / 2;
+            double r = 0, g = 0, b = 0;
+            if (hue < 60) { r = c; g = x; } else if (hue < 120) { r = x; g = c; } else if (hue < 180) { g = c; b = x; }
+            else if (hue < 240) { g = x; b = c; } else if (hue < 300) { r = x; b = c; } else { r = c; b = x; }
+            return Color.FromArgb(alpha, (byte)Math.Round((r + m) * 255), (byte)Math.Round((g + m) * 255), (byte)Math.Round((b + m) * 255));
+        }
+
+        // 卡片的顏色層（顏色都偏深、半透明：白字看得清楚，後面糊掉的影片也還透得出來）：
+        // 兩個色系：左上主色、右下另一個顏色，各佔一角，中間墊一層偏深的混色，柔和地接起來；
+        // 一個色系：左上淺（相近色）→ 中間主色 → 右下深，左上角再一圈柔和的亮光。
+        // 邊框也帶一點旁邊卡片的顏色（淡很多、很亮，看得出是邊框）
+        static int[] RenderCardColor(double[] hues, int width, int height, double pad, double cardW, double cardH, double s)
+        {
+            var radius = new CornerRadius(CardRadius(s));
+            var layers = new Grid { Width = cardW, Height = cardH, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
+            var edge = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = new Point(1, 1) };
+            if (hues.Length > 4 && hues[4] > 0)
+            {
+                double sat1 = Math.Max(0.35, Math.Min(0.8, hues[1] * 0.9)), sat2 = Math.Max(0.35, Math.Min(0.8, hues[3] * 0.9));
+                Color first = Hsl(hues[0], sat1, CornerLight(hues[0]), 255), second = Hsl(hues[2], sat2, CornerLight(hues[2]), 255);
+                var mix = Color.FromArgb(0x80, (byte)((first.R + second.R) / 2 * 0.42), (byte)((first.G + second.G) / 2 * 0.42), (byte)((first.B + second.B) / 2 * 0.42));
+                layers.Children.Add(new Border { CornerRadius = radius, Background = new SolidColorBrush(mix) });
+                layers.Children.Add(new Border { CornerRadius = radius, Background = CornerGlow(first, 0, 0) });
+                layers.Children.Add(new Border { CornerRadius = radius, Background = CornerGlow(second, 1, 1) });
+                edge.GradientStops.Add(new GradientStop(Hsl(hues[0], sat1 * 0.75, 0.80, 0x90), 0));
+                edge.GradientStops.Add(new GradientStop(Hsl(hues[2], sat2 * 0.75, 0.80, 0x90), 1));
+            }
+            else
+            {
+                double mainSat = Math.Max(0.3, Math.Min(0.75, hues[1] * 0.85)), nearSat = Math.Max(0.3, Math.Min(0.75, hues[3] * 0.85));
+                double darkHue = hues[0] - 8 * Math.Sign(((hues[2] - hues[0] + 540) % 360) - 180);   // 深色往相近色的反方向偏一點
+                var gradient = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = new Point(1, 1) };
+                gradient.GradientStops.Add(new GradientStop(Hsl(hues[2], nearSat, 0.46, 0x9A), 0));
+                gradient.GradientStops.Add(new GradientStop(Hsl(hues[0], mainSat, 0.34, 0x8C), 0.55));
+                gradient.GradientStops.Add(new GradientStop(Hsl(darkHue, Math.Min(0.8, mainSat + 0.05), 0.18, 0xA8), 1));
+                var glow = new RadialGradientBrush { Center = new Point(0.12, 0), GradientOrigin = new Point(0.12, 0), RadiusX = 0.75, RadiusY = 1.4 };
+                glow.GradientStops.Add(new GradientStop(Hsl(hues[2], nearSat, 0.62, 0x40), 0));
+                glow.GradientStops.Add(new GradientStop(Hsl(hues[2], nearSat, 0.62, 0x00), 1));
+                layers.Children.Add(new Border { CornerRadius = radius, Background = gradient });
+                layers.Children.Add(new Border { CornerRadius = radius, Background = glow });
+                edge.GradientStops.Add(new GradientStop(Hsl(hues[2], nearSat * 0.7, 0.82, 0x88), 0));
+                edge.GradientStops.Add(new GradientStop(Hsl(hues[0], mainSat * 0.7, 0.72, 0x78), 1));
+            }
+            layers.Children.Add(new Border { CornerRadius = radius, BorderBrush = edge, BorderThickness = new Thickness(1) });
+            var root = new Border { Padding = new Thickness(pad), Child = layers, UseLayoutRounding = true };
+            root.Measure(new Size(width, height));
+            root.Arrange(new Rect(0, 0, width, height));
+            return Snapshot(root, width, height);
+        }
+
+        // 兩個色系時每個角的亮度：黃、橘這類顏色太暗會變成土色，亮一點；藍紫色看起來比較暗，也亮一點
+        static double CornerLight(double hue)
+        {
+            hue = ((hue % 360) + 360) % 360;
+            return hue >= 35 && hue <= 80 ? 0.46 : hue > 200 && hue < 290 ? 0.42 : 0.38;
+        }
+
+        // 從卡片的一個角（cx, cy 是 0 或 1）往內擴散、越來越淡的顏色；範圍各大約佔卡片的一半
+        static Brush CornerGlow(Color color, double cx, double cy)
+        {
+            var glow = new RadialGradientBrush { Center = new Point(cx, cy), GradientOrigin = new Point(cx, cy), RadiusX = 0.78, RadiusY = 1.6 };
+            glow.GradientStops.Add(new GradientStop(Color.FromArgb(0xC8, color.R, color.G, color.B), 0));
+            glow.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, color.R, color.G, color.B), 1));
+            return glow;
         }
 
         // 毛玻璃的細微顆粒（跟 Windows 壓克力效果一樣的雜訊）：固定的亂數種子，每次畫出來都一樣，不會閃
@@ -3032,6 +3267,8 @@ namespace VideoWallpaper
         string shownClock, shownMusic;
         string shownSong;   // 卡片上目前顯示的是哪首歌（換歌時封面和文字要翻頁）
         double shownMicLevel = -1;   // 歌詞按鈕現在的亮度
+        string shownColorKey;        // 卡片上現在是哪個顏色（跟著專輯封面）
+        bool colorShown;             // 卡片的顏色已經放上去了（之後顏色變了才淡入淡出）
         bool busy;
 
         // 音量（Spotify 自己的音量）
@@ -3084,7 +3321,7 @@ namespace VideoWallpaper
             LockWindow.ResetCursor();
             Attach(engine);
             if (ActiveChanged != null) ActiveChanged();
-            NowPlaying.Start(delegate { if (Active) UpdateClock(true); });   // 開始讀 Spotify 正在播放的歌
+            NowPlaying.Start(delegate { if (Active) UpdateClock(true); });   // 開始讀正在播放的歌
             SpotifyVolume.Start();                                            // 和 Spotify 的音量
 
             // 趁控制面板（我們自己的視窗）還在前景，先把前景交給鎖定畫面，鍵盤輸入才會進來；
@@ -3136,6 +3373,7 @@ namespace VideoWallpaper
             if (engine == null) return;
             foreach (var w in windows) engine.AddTarget(w.Handle, w.Bounds.Width, w.Bounds.Height, w == primary);
             sheetName = null;   // 新引擎上還沒有歌詞的圖，要重新放上去
+            colorShown = false; // 卡片的顏色也是
             UpdateClock(true);
             engine.RequestRedraw();
         }
@@ -3165,7 +3403,7 @@ namespace VideoWallpaper
             double volume = Math.Max(0, shownVolume);
             if (track != null && !draggingVolume && Environment.TickCount - volumeSetTick > 1500)
             {
-                volumeFound = SpotifyVolume.Found;
+                volumeFound = SpotifyVolume.Found && track.IsSpotify;   // 卡片上是別的播放器（例如瀏覽器）時，音量按鈕變暗
                 if (volumeFound)
                 {
                     volume = Math.Round(SpotifyVolume.Level * 100) / 100;
@@ -3186,6 +3424,13 @@ namespace VideoWallpaper
                 int shadow = LockClock.ShadowPad(primary.Bounds.Height);
                 engine.SetGlassOverlay(primary.Handle, "music", c.Chrome, c.Width, c.Height, c.X, c.Y,
                     c.X + shadow, c.Y + shadow, c.Width - 2 * shadow, c.Height - 2 * shadow, LockClock.CardRadius(primary.Bounds.Height / 1080.0));
+                // 毛玻璃上的顏色（跟著專輯封面）：換歌顏色變了就慢慢換過去（跟翻頁一樣 0.45 秒），卡片剛出現或拿掉時直接換
+                if (card == null || c.ColorKey != shownColorKey || !colorShown)
+                {
+                    engine.SetFadeOverlay(primary.Handle, "musicColor", c.Color, c.Width, c.Height, c.X, c.Y, 1, card != null && colorShown ? 450 : 0);
+                    shownColorKey = c.ColorKey;
+                    colorShown = card != null;
+                }
 
                 // 封面、歌名、歌手：換歌時像翻頁一樣，舊的往左滑出、新的從右邊滑進來，兩張一起移動、間距不變，
                 // 移動距離剛好一張卡片寬，舊的完全離開卡片時新的剛好就定位（按「上一首」換回來的話方向相反）
@@ -3241,7 +3486,7 @@ namespace VideoWallpaper
         {
             var c = card ?? new LockClock.MusicCard();
             int shadow = LockClock.ShadowPad(primary.Bounds.Height);
-            engine.SetSlideOverlay(primary.Handle, name, pixels, c.Width, c.Height, c.X, c.Y, 1,
+            engine.SetSlideOverlay(primary.Handle, name, pixels, c.Width, c.Height, c.X, c.Y, 2,
                 c.X + shadow, c.Y + shadow, c.Width - 2 * shadow, c.Height - 2 * shadow, shift, 450, opacity, fadeMs, revealX, revealW, reveal, pivot, pivotW);
         }
 
@@ -3525,6 +3770,8 @@ namespace VideoWallpaper
             shownSong = null;   // 下次打開時卡片直接出現，不播換歌動畫
             shownMicLevel = -1;
             card = null;
+            colorShown = false;
+            shownColorKey = null;
             shownVolume = shownVolumeLevel = -1;
             volumeFound = draggingVolume = volumeExpanded = false;
             if (hoverTimer != null) { hoverTimer.Stop(); collapseTimer.Stop(); }
@@ -4087,6 +4334,7 @@ namespace VideoWallpaper
 
             // 鎖定畫面：先開（面板這時還在前景，鎖定畫面才拿得到鍵盤），再把面板直接收掉（不播動畫，反正會被蓋住）
             Find<Button>("LockButton").Click += delegate { app.ShowLockScreen(); HideNow(); };
+            Find<Button>("LockButton").ToolTip = Lang.T("鎖定畫面（" + WallpaperApp.LockHotKeyText + "）", "Lock screen (" + WallpaperApp.LockHotKeyText + ")");
 
             // 預覽用自己的小播放器（靜音），只在面板開著時播放
             // ScrubbingEnabled：暫停中跳到某個位置時也要畫出那一格（不開的話暫停時預覽是黑的）
@@ -4557,6 +4805,8 @@ namespace VideoWallpaper
             powerWindow.AddHook(PowerHook);
             var displayState = GUID_CONSOLE_DISPLAY_STATE;
             Native.RegisterPowerSettingNotification(powerWindow.Handle, ref displayState, 0);
+            // 同一個視窗也接收打開鎖定畫面的快速鍵（MOD_WIN | MOD_SHIFT | MOD_NOREPEAT）
+            Native.RegisterHotKey(powerWindow.Handle, LockHotKeyId, 0x8 | 0x4 | 0x4000, 'L');
 
             if (HasVideo)
                 Rebuild();
@@ -4990,8 +5240,17 @@ namespace VideoWallpaper
                 int state = Marshal.ReadInt32(lParam, 20);
                 SetSystemState(SystemState.DisplayOff, state == 0);
             }
+            else if (msg == 0x0312 && wParam.ToInt32() == LockHotKeyId)   // WM_HOTKEY：Win+Shift+L 打開鎖定畫面
+            {
+                if (!lockScreen.Active) ShowLockScreen();
+                handled = true;
+            }
             return IntPtr.Zero;
         }
+
+        // 全域快速鍵 Win+Shift+L：在任何地方都能直接打開鎖定畫面（被別的程式先登記走的話就沒有）
+        const int LockHotKeyId = 0x4C53;
+        public static readonly string LockHotKeyText = "Win+Shift+L";
 
         // 解鎖、喚醒、螢幕開啟後約 2.5 秒，直接看桌布視窗實際顯示的畫面：
         // 引擎說有輸出新畫面、畫面卻完全沒變，代表畫面沒送到桌面上 → 整個重建

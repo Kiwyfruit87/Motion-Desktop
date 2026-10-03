@@ -62,17 +62,23 @@ Turning the option off removes it. Only if creating the task fails does it fall 
 
 ## Lock screen (ChromeOS style)
 
-- The lock button in the control panel slides the whole screen down from the top and plays the video full screen,
-  with a clock (12-hour, with AM / PM) and the current weather (°C) in the bottom-left corner.
+- The lock button in the control panel (or **Win+Shift+L** from anywhere) slides the whole screen down from the top and plays the video full screen,
+  with a clock (12-hour, with AM / PM), the current weather (°C) and the date (for example "Saturday, October 3") in the bottom-left corner.
 - Press Space (or Enter, Esc) or click the mouse: the screen slides up and you're back on the desktop.
 - Switching to another app (Alt+Tab, Win key) or pressing Alt+F4 also slides it away.
 - This is a full-screen view that *looks like* a lock screen. It does not ask for a password; use Win+L to actually lock your PC.
-- While Spotify is playing, a frosted-glass music card appears in the bottom-right corner (the video behind it is blurred in real time):
+- While music is playing (Spotify, YouTube Music in a browser, or any app that shows up in the Windows media controls),
+  a frosted-glass music card appears in the bottom-right corner (the video behind it is blurred in real time):
   album art on the left, song title and artist on the right,
   with previous / play-pause / next buttons below (clicking them doesn't dismiss the lock screen). The card has equal margins to the right and bottom edges.
   When the song changes, the card content turns like a page: the old page slides out to the left while the new one slides in from the right,
   with a constant gap between them. Going back to the previous song reverses the direction.
   The data comes from Windows "System Media Transport Controls" (the same info shown in the volume flyout) and updates every second while the lock screen is open.
+  If several apps are playing, the one already on the card stays; when nothing is playing, it shows the one Windows considers current.
+- The card takes its color from the album art: a dark, semi-transparent gradient over the frosted glass.
+  If the art has two distinct colors (for example blue and yellow), one sits in the top-left and the other in the bottom-right;
+  otherwise it's a light-to-dark gradient of one color family. The border picks up a light tint of the nearby color.
+  When the song changes, the colors cross-fade. Black-and-white art keeps the plain frosted glass.
 - The **tilted microphone button** at the bottom-right of the card toggles lyrics (bright white when showing, half-bright when available but off,
   and it fades smoothly when its state changes). Click it and lyrics fade in above the card: the current line is brightest,
   lines farther away get dimmer, and it scrolls smoothly with playback. Click again to fade it out.
@@ -87,7 +93,7 @@ Turning the option off removes it. Only if creating the task fails does it fall 
     The mouse wheel over the card also changes the volume. The slider tucks back in a second after the mouse leaves.
   - It works through Windows UI Automation (the accessibility interface screen readers use) on Spotify's volume bar,
     so it changes in 10% steps, the finest step Spotify's volume bar accepts from outside.
-  - If Spotify's volume bar can't be found (for example, Spotify's window is closed), the button is dimmed.
+  - If Spotify's volume bar can't be found (for example, Spotify's window is closed), or the card is showing another app, the button is dimmed.
 - The mouse cursor only appears when you move the mouse and hides after 2.5 seconds.
 - The clock font is Google Sans Flex (in the `fonts` folder, SIL Open Font License, see `fonts\OFL.txt`).
 - Weather: the rough location is found from your IP address with ipapi.co (fallback: ipwho.is), then the weather comes from Open-Meteo, updated at most every 20 minutes.
@@ -192,14 +198,20 @@ H.264 `.mp4` is recommended. `.wmv` works too. HEVC (H.265) requires the HEVC ex
 
 ## 鎖定畫面（仿 ChromeOS）
 
-- 控制面板的鎖頭按鈕：整個畫面會從上面滑下來，全螢幕播放影片，左下角顯示時鐘（12 小時制，後面有 AM / PM）和目前天氣（攝氏）。
+- 控制面板的鎖頭按鈕（或在任何地方按 **Win+Shift+L**）：整個畫面會從上面滑下來，全螢幕播放影片，
+  左下角顯示時鐘（12 小時制，後面有 AM / PM）、目前天氣（攝氏）和英文日期（例如「Saturday, October 3」）。
 - 按空白鍵（或 Enter、Esc）、或按一下滑鼠：畫面往上滑走，回到桌面。
 - 切到別的程式（Alt+Tab、Win 鍵）或按 Alt+F4 也會滑走。
 - 這是「看起來像鎖定畫面」的全螢幕畫面，不會要求密碼；要真正鎖定電腦請用 Win+L。
-- Spotify 在播放時，右下角會出現一張毛玻璃的音樂卡片（卡片後面的影片會即時模糊）：左邊專輯封面，右邊歌名、歌手，
+- 有音樂在播放時（Spotify、瀏覽器裡的 YouTube Music，或其他會出現在 Windows 媒體控制裡的程式），
+  右下角會出現一張毛玻璃的音樂卡片（卡片後面的影片會即時模糊）：左邊專輯封面，右邊歌名、歌手，
   下面是上一首 / 播放暫停 / 下一首按鈕（可以直接點，不會讓鎖定畫面滑走）。卡片離螢幕右邊和下面的距離一樣。
   換歌時卡片內容會像翻頁一樣：舊的那頁往左滑出、新的從右邊滑進來，兩頁間距固定；回到前一首時方向相反。
   資料來自 Windows 的「系統媒體控制」（跟音量浮動視窗上的歌名是同一份），鎖定畫面開著時每秒更新一次。
+  同時有好幾個在播時，卡片上原本那個會繼續顯示；都沒在播時，顯示 Windows 認定的「目前」那個。
+- 卡片的顏色跟著專輯封面：在毛玻璃上疊一層偏深、半透明的漸層。封面有兩個明顯不同的顏色時（例如藍和黃），
+  一個在左上、一個在右下；不然就是同一個色系由淺到深。邊框也會帶一點旁邊卡片的淡淡顏色。
+  換歌時顏色會慢慢換過去；黑白的封面維持原本的毛玻璃。
 - 卡片右下的**斜放麥克風按鈕**是歌詞（顯示中是全白，有歌詞但沒開時半亮，狀態改變時會慢慢變亮或變暗）：按一下，卡片上方會淡入歌詞，目前唱到的那一行最亮、前後幾行越來越淡，
   跟著播放進度平順地往上捲；再按一下就淡出收起來。打開後換歌也會繼續顯示；
   鎖定畫面收起來之後歌詞就關掉，下次打開鎖定畫面時不會自動出現，要再按一次麥克風。
@@ -213,7 +225,7 @@ H.264 `.mp4` is recommended. `.wmv` works too. HEVC (H.265) requires the HEVC ex
     在卡片上滾滑鼠滾輪也能調。滑鼠離開一秒後音量條會縮回去。
   - 是透過 Windows 的協助工具介面（UI Automation，螢幕閱讀器用的那套）操作 Spotify 的音量條，
     所以一格是 10%（Spotify 的音量條從外面設定時最細就是這樣）。
-  - 找不到 Spotify 的音量條時（例如 Spotify 的視窗關掉了），按鈕會變暗。
+  - 找不到 Spotify 的音量條時（例如 Spotify 的視窗關掉了），或卡片上顯示的是別的程式，按鈕會變暗。
 - 移動滑鼠時才會出現游標，停 2.5 秒自動隱藏。
 - 時鐘字體是 Google Sans Flex（放在 `fonts` 資料夾，SIL Open Font License，授權條款見 `fonts\OFL.txt`）。
 - 天氣：先用 ipapi.co（備用 ipwho.is）依網路 IP 查大概位置，再向 Open-Meteo 查天氣，每 20 分鐘最多更新一次。
