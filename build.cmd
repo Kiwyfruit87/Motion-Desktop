@@ -7,6 +7,7 @@ set WPF=%FW%\WPF
 "%FW%\csc.exe" /nologo /target:winexe /optimize+ /codepage:65001 ^
   /out:"%~dp0VideoWallpaper.exe" /win32manifest:"%~dp0app.manifest" ^
   /r:"%WPF%\PresentationFramework.dll" /r:"%WPF%\PresentationCore.dll" /r:"%WPF%\WindowsBase.dll" ^
+  /r:"%WPF%\UIAutomationClient.dll" /r:"%WPF%\UIAutomationTypes.dll" ^
   /r:System.Xaml.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll ^
   "%~dp0VideoWallpaper.cs"
 if errorlevel 1 (echo 編譯失敗 / Build failed & exit /b 1)

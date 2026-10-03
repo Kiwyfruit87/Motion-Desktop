@@ -29,6 +29,7 @@ using System.Windows.Shell;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using WinForms = System.Windows.Forms;
+using UIA = System.Windows.Automation;
 
 namespace VideoWallpaper
 {
@@ -62,6 +63,10 @@ namespace VideoWallpaper
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder name, int max);
+        [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr hWnd, out int processId);
+        [DllImport("user32.dll")] public static extern bool AttachThreadInput(int thread, int attachTo, bool attach);
+        [DllImport("kernel32.dll")] public static extern int GetCurrentThreadId();
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextLength(IntPtr hWnd);
         [DllImport("user32.dll")] public static extern bool SetLayeredWindowAttributes(IntPtr hWnd, uint colorKey, byte alpha, uint flags);
         [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
         [DllImport("user32.dll")] public static extern int MapWindowPoints(IntPtr from, IntPtr to, [In, Out] POINT[] points, int count);
@@ -83,6 +88,10 @@ namespace VideoWallpaper
         [DllImport("user32.dll")] public static extern IntPtr SetCursor(IntPtr cursor);
         [DllImport("user32.dll")] public static extern IntPtr LoadCursor(IntPtr instance, int id);
         [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
+        [DllImport("user32.dll")] public static extern IntPtr SetCapture(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern bool ReleaseCapture();
+        [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key);
+        [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
         [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
         [DllImport("user32.dll")] public static extern int FillRect(IntPtr hdc, ref RECT rect, IntPtr brush);
         [DllImport("user32.dll")] public static extern IntPtr BeginDeferWindowPos(int count);
@@ -761,6 +770,23 @@ namespace VideoWallpaper
             drawBitmap(target, bitmap, ref dest, (float)opacity, 1 /* 線性 */, ref source);
         }
 
+        // 把 bitmap 上 (sx, sy, sw, sh) 這塊貼到 (dx, dy, dw, dh)；大小不一樣就拉伸
+        public void DrawPart(IntPtr bitmap, double sx, double sy, double sw, double sh, double dx, double dy, double dw, double dh, double opacity)
+        {
+            var dest = new RectF { Left = (float)dx, Top = (float)dy, Right = (float)(dx + dw), Bottom = (float)(dy + dh) };
+            var source = new RectF { Left = (float)sx, Top = (float)sy, Right = (float)(sx + sw), Bottom = (float)(sy + sh) };
+            drawBitmap(target, bitmap, ref dest, (float)opacity, 1 /* 線性 */, ref source);
+        }
+
+        // 關掉邊緣反鋸齒（拼接好幾塊時，接縫的地方才不會兩邊都只畫一半、變成一條淡淡的縫）
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void SetAntialiasModeFn(IntPtr self, int mode);
+        SetAntialiasModeFn setAntialias;
+        public void SetAliased(bool aliased)
+        {
+            if (setAntialias == null) setAntialias = Method<SetAntialiasModeFn>(target, 32);   // ID2D1RenderTarget::SetAntialiasMode
+            setAntialias(target, aliased ? 1 /* 不反鋸齒 */ : 0 /* 預設 */);
+        }
+
         public int End() { ulong tag1, tag2; return endDraw(target, out tag1, out tag2); }
 
         public void Release()
@@ -828,6 +854,13 @@ namespace VideoWallpaper
             public int MoveMs;
             public bool Clip;
             public int ClipX, ClipY, ClipW, ClipH;
+            // 展開 / 收起（音量條）：圖上 RevealX 開始、RevealW 寬的這段，展開到一半時從左邊長出來——
+            // 切成「左邊滑桿｜把手（RevealPivot 左右 RevealPivotW）｜右邊滑桿」三塊，兩邊照展開程度拉長、把手保持原樣。RevealW = 0 就是不用
+            public int RevealX, RevealW;
+            public double RevealPivot, RevealPivotW;
+            public double RevealFrom = 1, RevealTo = 1;
+            public long RevealStart;
+            public int RevealMs;
             // 毛玻璃：圖底下這塊圓角長方形 (GlassX, GlassY, GlassW, GlassH) 的影片先糊掉再貼圖
             public bool Glass;
             public int GlassX, GlassY, GlassW, GlassH;
@@ -971,8 +1004,11 @@ namespace VideoWallpaper
         //            兩張一起移動、間距不變，舊的完全離開卡片才拿掉。
         // shift = 0：只是換圖（例如封面晚一點才讀到），如果正在滑動就接著滑，不會跳。
         // opacity：這張圖的亮度（0～1）。只是換圖（shift = 0）時，從原本的亮度花 fadeMs 慢慢變到新的亮度
+        // revealW > 0：可以展開 / 收起的音量條（範圍 revealX 開始 revealW 寬，把手在 pivot、左右各 pivotW；
+        // reveal 是展開程度，之後用 RevealOverlay 慢慢展開 / 收起）；換圖時接著原本的展開程度
         public void SetSlideOverlay(IntPtr hwnd, string name, int[] pixels, int width, int height, int x, int y, int z,
-            int clipX, int clipY, int clipW, int clipH, int shift, int ms, double opacity, int fadeMs)
+            int clipX, int clipY, int clipW, int clipH, int shift, int ms, double opacity, int fadeMs,
+            int revealX = 0, int revealW = 0, double reveal = 1, double pivot = 0, double pivotW = 0)
         {
             Post(delegate
             {
@@ -989,6 +1025,12 @@ namespace VideoWallpaper
                 o2.Z = z;
                 o2.Clip = true; o2.ClipX = clipX; o2.ClipY = clipY; o2.ClipW = clipW; o2.ClipH = clipH;
                 o2.FadeFrom = o2.FadeTo = opacity;
+                o2.RevealX = revealX; o2.RevealW = revealW; o2.RevealPivot = pivot; o2.RevealPivotW = pivotW;
+                if (revealW > 0 && old != null && old.RevealW > 0)
+                {
+                    o2.RevealFrom = old.RevealFrom; o2.RevealTo = old.RevealTo; o2.RevealStart = old.RevealStart; o2.RevealMs = old.RevealMs;
+                }
+                else o2.RevealFrom = o2.RevealTo = reveal;
                 if (shift != 0)
                 {
                     if (old != null)
@@ -1042,6 +1084,29 @@ namespace VideoWallpaper
             });
         }
 
+        // 展開 / 收起（to = 1 全部露出、0 收起來），從目前的樣子接著變，花 ms 毫秒
+        public void RevealOverlay(IntPtr hwnd, string name, double to, int ms)
+        {
+            Post(delegate
+            {
+                var o = FindOverlay(hwnd, name);
+                if (o == null || o.RevealW <= 0) return;
+                long now = clock.ElapsedMilliseconds;
+                o.RevealFrom = RevealProgress(o, now);
+                o.RevealTo = to; o.RevealStart = now; o.RevealMs = ms;
+                redraw = true;
+            });
+        }
+
+        // 展開的程度：展開用減速曲線（一開始就動、最後慢慢停下），收起用加速曲線（慢慢起步、滑回去）
+        static double RevealProgress(Overlay o, long now)
+        {
+            if (o.RevealMs <= 0 || now - o.RevealStart >= o.RevealMs) return o.RevealTo;
+            double t = (now - o.RevealStart) / (double)o.RevealMs;
+            double eased = o.RevealTo >= o.RevealFrom ? 1 - Math.Pow(1 - t, 3) : t * t;
+            return o.RevealFrom + (o.RevealTo - o.RevealFrom) * eased;
+        }
+
         Overlay FindOverlay(IntPtr hwnd, string name)
         {
             var t = targets.Find(x => x.Hwnd == hwnd);
@@ -1076,7 +1141,7 @@ namespace VideoWallpaper
         static bool IsAnimating(Overlay o, long now)
         {
             return (o.ScrollMs > 0 && now - o.ScrollStart < o.ScrollMs) || (o.FadeMs > 0 && now - o.FadeStart < o.FadeMs)
-                || (o.MoveMs > 0 && now - o.MoveStart < o.MoveMs);
+                || (o.MoveMs > 0 && now - o.MoveStart < o.MoveMs) || (o.RevealMs > 0 && now - o.RevealStart < o.RevealMs);
         }
 
         public void SetPlaying(bool play)
@@ -1358,11 +1423,14 @@ namespace VideoWallpaper
                 if (fade <= 0.004) continue;
                 if (o.ViewH == 0)
                 {
+                    double reveal = o.RevealW > 0 ? RevealProgress(o, now) : 1;
+                    if (reveal <= 0.001) continue;
                     if (o.GlassReady)
                         t.D2D.FillBlur(o.GlassX, o.GlassY, o.GlassW, o.GlassH, o.GlassRadius, o.BlurX, o.BlurY, o.BlurW, o.BlurH, Math.Min(1, fade));
                     double offset = Animated(o.MoveFrom, o.MoveTo, o.MoveStart, o.MoveMs, now);
                     if (o.Clip) t.D2D.PushClip(o.ClipX, o.ClipY, o.ClipW, o.ClipH);
-                    t.D2D.Draw(o.D2DBitmap, o.X + offset, o.Y, o.W, o.H, 0, Math.Min(1, fade));
+                    if (reveal < 0.999) DrawGrowing(t.D2D, o, o.X + offset, reveal, Math.Min(1, fade));
+                    else t.D2D.Draw(o.D2DBitmap, o.X + offset, o.Y, o.W, o.H, 0, Math.Min(1, fade));
                     if (o.Clip) t.D2D.PopClip();
                     continue;
                 }
@@ -1382,6 +1450,32 @@ namespace VideoWallpaper
             return animating;
         }
 
+        // 展開到一半的音量條：切成「左邊滑桿｜把手｜右邊滑桿」三塊，兩邊照展開程度拉長、把手保持原樣（不會被壓扁），
+        // 整條從喇叭旁邊長出來、同時淡入；完全展開時三塊剛好接回原本的圖。x：這張圖現在在畫面上的左邊
+        static void GrowingParts(Overlay o, double x, double reveal, out double[] source, out double[] dest)
+        {
+            double a = o.RevealX, d = o.RevealX + o.RevealW;
+            double b = Math.Max(a, Math.Min(d, o.RevealPivot - o.RevealPivotW));
+            double c = Math.Max(b, Math.Min(d, o.RevealPivot + o.RevealPivotW));
+            double left = (b - a) * reveal, right = (d - c) * reveal;
+            source = new[] { a, b - a, b, c - b, c, d - c };                                      // 每塊在圖上的左邊和寬度
+            dest = new[] { x + a, left, x + a + left, c - b, x + a + left + (c - b), right };    // 每塊在畫面上的左邊和寬度
+        }
+
+        static double GrowingOpacity(double reveal) { return Math.Min(1, reveal * 1.6); }   // 長到六成多就完全不透明
+
+        static void DrawGrowing(D2DTarget d2d, Overlay o, double x, double reveal, double opacity)
+        {
+            double[] source, dest;
+            GrowingParts(o, x, reveal, out source, out dest);
+            double alpha = opacity * GrowingOpacity(reveal);
+            d2d.SetAliased(true);
+            for (int i = 0; i < 6; i += 2)
+                if (dest[i + 1] > 0.01 && source[i + 1] > 0)
+                    d2d.DrawPart(o.D2DBitmap, source[i], 0, source[i + 1], o.H, dest[i], o.Y, dest[i + 1], o.H, alpha);
+            d2d.SetAliased(false);
+        }
+
         // 退回 GDI：這台電腦不支援 Direct2D 時才用
         static bool DrawOverlayGdi(Target t, long now)
         {
@@ -1395,11 +1489,29 @@ namespace VideoWallpaper
                 if (fade <= 0.004) continue;
                 if (o.ViewH == 0)
                 {
-                    var blend = new Native.BLENDFUNCTION { SourceConstantAlpha = (byte)Math.Round(255 * Math.Min(1, fade)), AlphaFormat = 1 };
+                    double reveal = o.RevealW > 0 ? RevealProgress(o, now) : 1;
+                    if (reveal <= 0.001) continue;
                     int offset = (int)Math.Round(Animated(o.MoveFrom, o.MoveTo, o.MoveStart, o.MoveMs, now));
                     int saved = o.Clip ? Native.SaveDC(dc) : 0;
                     if (o.Clip) Native.IntersectClipRect(dc, o.ClipX, o.ClipY, o.ClipX + o.ClipW, o.ClipY + o.ClipH);
-                    Native.AlphaBlend(dc, o.X + offset, o.Y, o.W, o.H, o.DC, 0, 0, o.W, o.H, blend);
+                    if (reveal < 0.999)
+                    {
+                        // 展開到一半：三塊各自拉伸貼上（位置取整數，接縫才不會重疊或空一條）
+                        double[] source, dest;
+                        GrowingParts(o, o.X + offset, reveal, out source, out dest);
+                        var growing = new Native.BLENDFUNCTION { SourceConstantAlpha = (byte)Math.Round(255 * Math.Min(1, fade) * GrowingOpacity(reveal)), AlphaFormat = 1 };
+                        for (int i = 0; i < 6; i += 2)
+                        {
+                            int sx = (int)Math.Round(source[i]), sw = (int)Math.Round(source[i] + source[i + 1]) - sx;
+                            int dx = (int)Math.Round(dest[i]), dw = (int)Math.Round(dest[i] + dest[i + 1]) - dx;
+                            if (sw > 0 && dw > 0) Native.AlphaBlend(dc, dx, o.Y, dw, o.H, o.DC, sx, 0, sw, o.H, growing);
+                        }
+                    }
+                    else
+                    {
+                        var blend = new Native.BLENDFUNCTION { SourceConstantAlpha = (byte)Math.Round(255 * Math.Min(1, fade)), AlphaFormat = 1 };
+                        Native.AlphaBlend(dc, o.X + offset, o.Y, o.W, o.H, o.DC, 0, 0, o.W, o.H, blend);
+                    }
                     if (o.Clip) Native.RestoreDC(dc, saved);
                     continue;
                 }
@@ -1814,6 +1926,172 @@ namespace VideoWallpaper
         static object Get(object target, Type type, string property) { return type.GetProperty(property).GetValue(target, null); }
     }
 
+    // Spotify 自己的音量（Spotify 程式右下角那條音量條，不是 Windows 的音量混音器）：
+    // 透過 Windows 的協助工具介面（UI Automation，螢幕閱讀器用的那套）找到那條滑桿來讀取和設定。
+    // 從外面設定時 Spotify 的音量條一格是 10%，所以只能調到 0%、10%、…、100%。
+    // 跨程式呼叫一次要幾十毫秒，全部在背景執行緒做，鎖定畫面不會卡
+    static class SpotifyVolume
+    {
+        public const double Step = 0.1;
+
+        static readonly object gate = new object();
+        static readonly AutoResetEvent wake = new AutoResetEvent(false);
+        static Thread worker;
+        static bool running;
+        static double pending = -1;   // 等著要設定的音量（-1 = 沒有）
+        static bool pendingMute;      // 等著要按 Spotify 的靜音鈕
+        static double level = -1;     // 最近讀到的音量（-1 = 找不到 Spotify 的音量條）
+        static UIA.AutomationElement slider, muteButton;
+        static int searchTick;
+
+        public static bool Found { get { lock (gate) return level >= 0; } }
+        public static double Level { get { lock (gate) return Math.Max(0, level); } }
+
+        // 鎖定畫面打開時開始每半秒讀一次（上次讀到的音量先留著，卡片一出現就有東西顯示）
+        public static void Start()
+        {
+            lock (gate)
+            {
+                running = true;
+                if (worker == null)
+                {
+                    worker = new Thread(Run) { IsBackground = true, Name = "SpotifyVolume" };
+                    worker.Start();
+                }
+            }
+            wake.Set();
+        }
+
+        public static void Stop() { lock (gate) { running = false; pending = -1; pendingMute = false; } }
+
+        // 設定音量（0～1，會對齊到 10% 一格）；拖曳時連續呼叫的話，背景只會設最後一次
+        public static void Set(double volume)
+        {
+            lock (gate) { pending = Math.Max(0, Math.Min(1, volume)); pendingMute = false; }
+            wake.Set();
+        }
+
+        // 按 Spotify 自己的靜音鈕：靜音，或回到靜音前的音量（Spotify 自己記得確切的音量，不會被 10% 一格進位）。
+        // expected：按完應該變成多少（找不到靜音鈕時就直接設成這個音量）
+        public static void ToggleMute(double expected)
+        {
+            lock (gate) { pending = Math.Max(0, Math.Min(1, expected)); pendingMute = true; }
+            wake.Set();
+        }
+
+        static void Run()
+        {
+            while (true)
+            {
+                bool on;
+                lock (gate) on = running;
+                wake.WaitOne(on ? 500 : Timeout.Infinite);
+                double target;
+                bool mute;
+                lock (gate)
+                {
+                    if (!running) continue;
+                    target = pending;
+                    mute = pendingMute;
+                    pending = -1;
+                    pendingMute = false;
+                }
+                double result = Access(target, mute);
+                lock (gate) level = result;
+            }
+        }
+
+        // target ≥ 0：設定成 target（mute = true 時改按靜音鈕）；否則讀現在的音量。回傳音量，找不到音量條回傳 -1
+        static double Access(double target, bool mute)
+        {
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                try
+                {
+                    if (slider == null)
+                    {
+                        // 找不到的話每 2 秒找一次（第一次問的時候 Spotify 才開始整理介面，要過一下才找得到）
+                        if (attempt == 0 && Environment.TickCount - searchTick < 2000) return -1;
+                        searchTick = Environment.TickCount;
+                        slider = FindSlider();
+                        if (slider == null) return -1;
+                        muteButton = FindMuteButton(slider);
+                    }
+                    if (mute && muteButton != null)
+                    {
+                        mute = false;   // 只按一次（就算後面出錯重試，也改成直接設定音量，不會按兩次又切回去）
+                        ((UIA.InvokePattern)muteButton.GetCurrentPattern(UIA.InvokePattern.Pattern)).Invoke();
+                        return target;   // Spotify 要一下子才會更新，先當作按好了
+                    }
+                    var range = (UIA.RangeValuePattern)slider.GetCurrentPattern(UIA.RangeValuePattern.Pattern);
+                    if (target < 0) return range.Current.Value;
+                    double snapped = Math.Round(Math.Round(target / Step) * Step, 2);
+                    // 注意：設定時 Spotify 會把自己的視窗叫到前景（鎖定畫面那邊會處理，不會因此收起來）
+                    range.SetValue(snapped);
+                    return snapped;   // Spotify 要一下子才會更新，先當作設好了，下次再讀實際的
+                }
+                catch { slider = muteButton = null; }   // Spotify 重開、換了介面：重新找
+            }
+            return -1;
+        }
+
+        // 靜音鈕：音量條旁邊的按鈕（從音量條往外一層一層找，第一個有按鈕的那層；不看名稱，Spotify 是什麼語言都一樣）
+        static UIA.AutomationElement FindMuteButton(UIA.AutomationElement slider)
+        {
+            var walker = UIA.TreeWalker.RawViewWalker;
+            var e = slider;
+            for (int level = 0; level < 4; level++)
+            {
+                e = walker.GetParent(e);
+                if (e == null) return null;
+                for (var child = walker.GetFirstChild(e); child != null; child = walker.GetNextSibling(child))
+                {
+                    object pattern;
+                    if (child.Current.ControlType == UIA.ControlType.Button && child.TryGetCurrentPattern(UIA.InvokePattern.Pattern, out pattern)) return child;
+                }
+            }
+            return null;
+        }
+
+        // Spotify 視窗裡範圍是 0～1 的滑桿就是音量條（播放進度的單位是毫秒、側欄寬度是像素）
+        static UIA.AutomationElement FindSlider()
+        {
+            var sliders = new UIA.PropertyCondition(UIA.AutomationElement.ControlTypeProperty, UIA.ControlType.Slider);
+            foreach (var window in SpotifyWindows())
+            {
+                foreach (UIA.AutomationElement e in UIA.AutomationElement.FromHandle(window).FindAll(UIA.TreeScope.Descendants, sliders))
+                {
+                    object pattern;
+                    if (!e.TryGetCurrentPattern(UIA.RangeValuePattern.Pattern, out pattern)) continue;
+                    var range = ((UIA.RangeValuePattern)pattern).Current;
+                    if (range.Minimum == 0 && range.Maximum == 1) return e;
+                }
+            }
+            return null;
+        }
+
+        // Spotify 的主視窗（縮到系統匣時視窗是藏起來的，一樣找得到）
+        static List<IntPtr> SpotifyWindows()
+        {
+            var pids = new HashSet<int>();
+            foreach (var p in System.Diagnostics.Process.GetProcessesByName("Spotify")) { pids.Add(p.Id); p.Dispose(); }
+            var windows = new List<IntPtr>();
+            if (pids.Count == 0) return windows;
+            var name = new StringBuilder(64);
+            Native.EnumWindows(delegate(IntPtr h, IntPtr lParam)
+            {
+                int pid;
+                Native.GetWindowThreadProcessId(h, out pid);
+                if (!pids.Contains(pid) || Native.GetWindowTextLength(h) == 0) return true;
+                name.Length = 0;
+                Native.GetClassName(h, name, name.Capacity);
+                if (name.ToString().StartsWith("Chrome_WidgetWin", StringComparison.Ordinal)) windows.Add(h);
+                return true;
+            }, IntPtr.Zero);
+            return windows;
+        }
+    }
+
     // 歌詞：向 LRCLIB（https://lrclib.net，免費公開的社群歌詞資料庫）查詢。
     // 有時間標記的「同步歌詞」會跟著播放進度一行一行捲動；只有一般歌詞的話，就照歌曲長度平均分配時間慢慢捲。
     static class Lyrics
@@ -2103,15 +2381,34 @@ namespace VideoWallpaper
         public static double CardRadius(double s) { return Math.Round(14 * s); }
         public static double LyricsWidth(double s) { return Math.Round(284 * s); }
 
-        // 右下角：Spotify 正在播放的歌（沒在播就回傳 null）。
-        // buttons：回傳各個按鈕在螢幕上的位置，讓鎖定畫面知道滑鼠點到哪個
-        // lyricsState：0 = 沒有歌詞（按鈕變暗），1 = 有歌詞，2 = 歌詞顯示中
-        // 回傳卡片的「毛玻璃底＋邊框」那張圖；同樣大小、同樣位置還有兩張：
-        // info＝封面、歌名、歌手、播放按鈕（換歌時整頁滑動），mic＝歌詞按鈕（全亮畫好，亮度交給播放引擎慢慢調）
-        public static int[] RenderMusic(int screenWidth, int screenHeight, List<KeyValuePair<Rect, string>> buttons, out int[] info, out int[] mic, out int width, out int height, out int x, out int y)
+        // 音樂卡片：四張同樣大小、疊在同樣位置的圖
+        public class MusicCard
         {
-            info = mic = null;
-            width = height = x = y = 0;
+            public int[] Chrome;   // 毛玻璃底＋邊框（不動）
+            public int[] Info;     // 封面、歌名、歌手、播放按鈕（換歌時整頁滑動）
+            public int[] Mic;      // 歌詞按鈕（全亮畫好，亮度交給播放引擎慢慢調）
+            public int[] Volume;   // 喇叭（音量變了只重畫這張和 VolumeBar）
+            public int[] VolumeBar;   // 音量滑桿（平常收起來，滑鼠停在喇叭上才展開）
+            public int Width, Height, X, Y;
+            public double TrackLeft, TrackWidth;   // 音量滑桿在螢幕上的左端和長度（點或拖曳時換算成音量）
+            public int RevealX, RevealW;           // 音量滑桿在圖上的範圍（展開動畫從左邊長出來）
+            public double KnobRadius;              // 把手的半徑（展開時把手保持原樣，不跟著拉長）
+
+            // 音量是 volume 時，把手中心在圖上的位置
+            public double KnobX(double volume) { return TrackLeft - X + TrackWidth * Math.Max(0, Math.Min(1, volume)); }
+        }
+
+        // 最近一次畫的卡片版面（音量變了只改滑桿再畫一次音量那兩張，不用整個重排）
+        static Border cardRoot;
+        static List<UIElement>[] cardLayers;   // chrome、info、mic、喇叭、滑桿
+        static VolumeControl cardVolume;
+        static int cardWidth, cardHeight;
+
+        // 右下角：Spotify 正在播放的歌（沒在播就回傳 null）。
+        // buttons：回傳各個按鈕在螢幕上的位置，讓鎖定畫面知道滑鼠點到哪個；volume：Spotify 現在的音量（0～1）
+        public static MusicCard RenderMusic(int screenWidth, int screenHeight, double volume, List<KeyValuePair<Rect, string>> buttons)
+        {
+            cardRoot = null;
             var track = NowPlaying.Current;
             if (track == null) return null;
             double s = screenHeight / 1080.0;
@@ -2120,35 +2417,54 @@ namespace VideoWallpaper
             var infoParts = new List<UIElement>();
             var chromeParts = new List<UIElement>();
             UIElement micPart;
+            VolumeControl volumeControl;
             Border root;
-            Wrap(BuildNowPlaying(track, s, controls, infoParts, chromeParts, out micPart), s, pad, out root, out width, out height);
+            var card = new MusicCard();
+            Wrap(BuildNowPlaying(track, s, controls, infoParts, chromeParts, out micPart, out volumeControl), s, pad, out root, out card.Width, out card.Height);
             // 離右邊和下面一樣是 52（下緣跟左下角的時鐘對齊）
-            x = (int)Math.Round(screenWidth - 52 * s - width + pad);
-            y = (int)Math.Round(screenHeight - 52 * s - height + pad);
+            card.X = (int)Math.Round(screenWidth - 52 * s - card.Width + pad);
+            card.Y = (int)Math.Round(screenHeight - 52 * s - card.Height + pad);
             foreach (var c in controls)
             {
                 var p = c.Key.TransformToAncestor(root).Transform(new Point(0, 0));
-                buttons.Add(new KeyValuePair<Rect, string>(new Rect(p.X + x, p.Y + y, c.Key.RenderSize.Width, c.Key.RenderSize.Height), c.Value));
+                buttons.Add(new KeyValuePair<Rect, string>(new Rect(p.X + card.X, p.Y + card.Y, c.Key.RenderSize.Width, c.Key.RenderSize.Height), c.Value));
             }
+            double trackLeft = volumeControl.Panel.TransformToAncestor(root).Transform(new Point(volumeControl.TrackLeft, 0)).X;
+            card.TrackLeft = trackLeft + card.X;
+            card.TrackWidth = volumeControl.TrackWidth;
+            // 展開的範圍：滑桿左右各多留把手的半徑和一點空間
+            double margin = volumeControl.KnobRadius + Math.Round(3 * s);
+            card.RevealX = (int)Math.Floor(trackLeft - margin);
+            card.RevealW = (int)Math.Ceiling(volumeControl.TrackWidth + 2 * margin);
+            card.KnobRadius = volumeControl.KnobRadius;
 
-            // 同一個版面畫三次，每次只留一部分（Hidden 會保留位置，三張圖完全對齊）
-            var pixels = SnapshotOnly(root, width, height, chromeParts, infoParts, micPart);
-            info = SnapshotOnly(root, width, height, infoParts, chromeParts, micPart);
-            mic = SnapshotOnly(root, width, height, new List<UIElement> { micPart }, chromeParts, infoParts);
-            return pixels;
+            // 同一個版面畫五次，每次只留一部分（Hidden 會保留位置，五張圖完全對齊）
+            cardLayers = new[] { chromeParts, infoParts, new List<UIElement> { micPart }, volumeControl.IconParts, volumeControl.BarParts };
+            cardRoot = root; cardVolume = volumeControl; cardWidth = card.Width; cardHeight = card.Height;
+            card.Chrome = SnapshotLayer(0);
+            card.Info = SnapshotLayer(1);
+            card.Mic = SnapshotLayer(2);
+            card.Volume = RenderVolume(volume, out card.VolumeBar);
+            return card;
         }
 
-        // 只顯示 show 這些、藏起其他的，畫一張
-        static int[] SnapshotOnly(Border root, int width, int height, List<UIElement> show, List<UIElement> hide1, object hide2)
+        // 音量變了：只改滑桿和喇叭圖示，重畫喇叭和滑桿那兩張（跟卡片其他圖一樣大小、一樣位置）
+        public static int[] RenderVolume(double volume, out int[] bar)
         {
-            foreach (var e in show) e.Visibility = Visibility.Visible;
-            foreach (var e in hide1) e.Visibility = Visibility.Hidden;
-            var single = hide2 as UIElement;
-            if (single != null) single.Visibility = Visibility.Hidden;
-            var list = hide2 as List<UIElement>;
-            if (list != null) foreach (var e in list) e.Visibility = Visibility.Hidden;
-            root.UpdateLayout();
-            return Snapshot(root, width, height);
+            bar = null;
+            if (cardRoot == null) return null;
+            cardVolume.Show(volume);
+            bar = SnapshotLayer(4);
+            return SnapshotLayer(3);
+        }
+
+        // 只顯示第 index 層、藏起其他層，畫一張
+        static int[] SnapshotLayer(int index)
+        {
+            for (int i = 0; i < cardLayers.Length; i++)
+                foreach (var e in cardLayers[i]) e.Visibility = i == index ? Visibility.Visible : Visibility.Hidden;
+            cardRoot.UpdateLayout();
+            return Snapshot(cardRoot, cardWidth, cardHeight);
         }
 
         // 把內容加上陰影畫成一張半透明圖（周圍留 pad 的空間給陰影）
@@ -2241,11 +2557,11 @@ namespace VideoWallpaper
         }
 
         // 橫向的卡片（半透明深色圓角長方形）：左邊專輯封面；右邊上面歌名、下面歌手，
-        // 再下面一排上一首、播放暫停、下一首，最右邊是歌詞按鈕
+        // 再下面一排上一首、播放暫停、下一首、音量，最右邊是歌詞按鈕
         // info：封面、歌名、歌手、播放按鈕（換歌時整頁滑動）；mic：歌詞按鈕（也跟著滑，亮度另外調）；
-        // chrome：卡片的毛玻璃底和邊框（不動）
+        // volume：喇叭和音量滑桿（也跟著滑，音量變了單獨重畫）；chrome：卡片的毛玻璃底和邊框（不動）
         static FrameworkElement BuildNowPlaying(NowPlaying.Track track, double s, List<KeyValuePair<FrameworkElement, string>> controls,
-            List<UIElement> info, List<UIElement> chrome, out UIElement mic)
+            List<UIElement> info, List<UIElement> chrome, out UIElement mic, out VolumeControl volume)
         {
             var row = new StackPanel { Orientation = Orientation.Horizontal };
 
@@ -2296,9 +2612,15 @@ namespace VideoWallpaper
             lyrics.Child = MicIcon(s);
             mic = lyricsHost;
             bar.Children.Add(lyricsHost);
+            // 音量：下一首和歌詞按鈕中間的空間
+            double barWidth = Math.Round(196 * s) + 2 * inset;
+            volume = BuildVolume(s, buttonSize, barWidth - 4 * buttonSize, controls);
+            volume.Panel.HorizontalAlignment = HorizontalAlignment.Left;
+            volume.Panel.Margin = new Thickness(3 * buttonSize, 0, 0, 0);
+            bar.Children.Add(volume.Panel);
             right.Children.Add(bar);
             row.Children.Add(right);
-            // 按鈕跟著一起翻頁（固定不動的話，滑過去的封面會蓋到按鈕）：播放按鈕在 info、歌詞按鈕在 mic，兩張一起滑
+            // 按鈕跟著一起翻頁（固定不動的話，滑過去的封面會蓋到按鈕）：播放按鈕在 info、歌詞按鈕在 mic、音量在 volume，三張一起滑
 
             // 毛玻璃：最底下是播放引擎糊掉的影片（看得到後面燈光的模糊輪廓），
             // 上面只疊很淡的霧白、上緣一道反光、細微的顆粒，讓後面的顏色透出來
@@ -2367,6 +2689,64 @@ namespace VideoWallpaper
             };
             canvas.Children.Add(body);
             return canvas;
+        }
+
+        // 音量：左邊喇叭（按了靜音 / 取消靜音；停 0.5 秒展開滑桿），右邊滑桿（點或拖曳調整）
+        class VolumeControl
+        {
+            public Canvas Panel;
+            public List<UIElement> IconParts = new List<UIElement>(), BarParts = new List<UIElement>();   // 喇叭、滑桿各畫成一張
+            public double TrackLeft, TrackWidth;   // 滑桿在 Panel 裡的左端和長度
+            public TextBlock Icon;
+            public Border Fill;
+            public FrameworkElement Knob;
+            public double KnobRadius;
+
+            public void Show(double volume)
+            {
+                volume = Math.Max(0, Math.Min(1, volume));
+                // 靜音是喇叭打叉，其他依音量大小顯示一到三道聲波
+                Icon.Text = volume <= 0 ? "" : volume < 0.34 ? "" : volume < 0.67 ? "" : "";
+                Fill.Width = TrackWidth * volume;
+                Canvas.SetLeft(Knob, TrackLeft + TrackWidth * volume - KnobRadius);
+            }
+        }
+
+        static VolumeControl BuildVolume(double s, double buttonSize, double width, List<KeyValuePair<FrameworkElement, string>> controls)
+        {
+            var v = new VolumeControl { Panel = new Canvas { Width = width, Height = buttonSize }, KnobRadius = Math.Round(5 * s) };
+
+            // 喇叭：跟播放按鈕一樣大，圖示的間距也跟它們一樣
+            v.Icon = new TextBlock { FontFamily = IconFont, FontSize = 15 * s, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+            var mute = new Border { Width = buttonSize, Height = buttonSize, Background = Brushes.Transparent, Child = v.Icon };
+            v.Panel.Children.Add(mute);
+            v.IconParts.Add(mute);
+            controls.Add(new KeyValuePair<FrameworkElement, string>(mute, "mute"));
+
+            // 滑桿：從喇叭圖示右邊一點，到歌詞按鈕的麥克風前面（把手拉到最右邊也不會碰到麥克風）
+            double inset = (buttonSize - 15 * s) / 2, gap = Math.Round(7 * s);
+            double micLeft = width + (buttonSize - Math.Round(18 * s)) / 2;
+            v.TrackLeft = buttonSize - inset + gap;
+            v.TrackWidth = micLeft - gap - v.KnobRadius - v.TrackLeft;
+            double thickness = Math.Max(2, Math.Round(4 * s)), top = (buttonSize - thickness) / 2;
+            var track = new Border { Width = v.TrackWidth, Height = thickness, CornerRadius = new CornerRadius(thickness / 2), Background = new SolidColorBrush(Color.FromArgb(0x4D, 255, 255, 255)) };
+            v.Fill = new Border { Height = thickness, CornerRadius = new CornerRadius(thickness / 2), Background = Brushes.White };
+            v.Knob = new System.Windows.Shapes.Ellipse { Width = v.KnobRadius * 2, Height = v.KnobRadius * 2, Fill = Brushes.White };
+            Canvas.SetLeft(track, v.TrackLeft); Canvas.SetTop(track, top);
+            Canvas.SetLeft(v.Fill, v.TrackLeft); Canvas.SetTop(v.Fill, top);
+            Canvas.SetTop(v.Knob, buttonSize / 2 - v.KnobRadius);
+            v.Panel.Children.Add(track);
+            v.Panel.Children.Add(v.Fill);
+            v.Panel.Children.Add(v.Knob);
+
+            // 點或拖曳的範圍：喇叭右邊到歌詞按鈕前面，整排按鈕的高度（比滑桿本身好點）
+            var hit = new Border { Width = width - buttonSize, Height = buttonSize, Background = Brushes.Transparent };
+            Canvas.SetLeft(hit, buttonSize);
+            v.Panel.Children.Add(hit);
+            v.BarParts.AddRange(new UIElement[] { track, v.Fill, v.Knob, hit });
+            controls.Add(new KeyValuePair<FrameworkElement, string>(hit, "volume"));
+            v.Show(0);
+            return v;
         }
 
         static Border AddControl(Panel panel, string glyph, string action, double s, double size, List<KeyValuePair<FrameworkElement, string>> controls)
@@ -2475,7 +2855,35 @@ namespace VideoWallpaper
     {
         public Action Dismiss, Leave, Exposed;
         public Func<int, int, bool> Click;   // 回傳 true = 點到「正在播放」的按鈕，不要滑走
+        public Action<int, int> Hover;       // 滑鼠移動（停在喇叭上展開音量條用）
+        public Action<int, int> Drag;        // 按著左鍵拖曳音量滑桿（StartDrag 之後才會收到）
+        public Action Drop;                  // 放開左鍵
+        public Func<int, int, int, bool> Wheel;   // 滑鼠滾輪（位置、轉了多少）；回傳 true = 用掉了
         public System.Drawing.Rectangle Bounds { get; private set; }
+        bool dragging;
+
+        // 開始拖曳：滑鼠移到別的螢幕也繼續收到移動，直到放開左鍵。
+        // 拖曳中前景被搶走（Spotify 設定音量時會跳到前景）可能會失去這個「抓住」，
+        // 不過鎖定畫面蓋滿整個螢幕，移動一樣會送到這裡，所以拖曳照常繼續
+        public void StartDrag()
+        {
+            dragging = true;
+            Native.SetCapture(Handle);
+        }
+
+        public void EndDrag()
+        {
+            if (!dragging) return;
+            dragging = false;
+            Native.ReleaseCapture();
+        }
+
+        // 滑鼠左鍵現在是不是按著（實際的按鍵狀態；左右鍵對調的話看右鍵）
+        public static bool LeftButtonDown()
+        {
+            int key = Native.GetSystemMetrics(23 /* SM_SWAPBUTTON */) != 0 ? 0x02 : 0x01;
+            return (Native.GetAsyncKeyState(key) & 0x8000) != 0;
+        }
         public bool PaintBlack = true;   // 影片畫上來之後就不要再用 GDI 塗黑（會蓋掉影片、閃一下黑）
 
         // 滑鼠游標：移動滑鼠時才出現（才點得到播放按鈕），停一下就由 LockScreen 藏起來
@@ -2532,6 +2940,22 @@ namespace VideoWallpaper
                         LastMove = DateTime.Now;
                         if (!CursorShown) { CursorShown = true; Native.SetCursor(Arrow); }
                     }
+                    long mp = m.LParam.ToInt64();
+                    int mx = (short)(mp & 0xFFFF), my = (short)((mp >> 16) & 0xFFFF);
+                    if (Hover != null) Hover(mx, my);
+                    if (dragging && Drag != null) Drag(mx, my);
+                    break;
+                case 0x0202:   // WM_LBUTTONUP：拖曳結束
+                    if (dragging)
+                    {
+                        EndDrag();
+                        if (Drop != null) Drop();
+                    }
+                    return;
+                case 0x020A:   // WM_MOUSEWHEEL：位置是螢幕座標，換成視窗裡的（鎖定畫面蓋滿整個螢幕）
+                    long wp = m.LParam.ToInt64();
+                    int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
+                    if (Wheel != null && Wheel((short)(wp & 0xFFFF) - Bounds.X, (short)((wp >> 16) & 0xFFFF) - Bounds.Y, delta)) return;
                     break;
                 case 0x0100:   // WM_KEYDOWN：空白鍵 / Enter / Esc
                     int key = m.WParam.ToInt32();
@@ -2610,6 +3034,16 @@ namespace VideoWallpaper
         double shownMicLevel = -1;   // 歌詞按鈕現在的亮度
         bool busy;
 
+        // 音量（Spotify 自己的音量）
+        LockClock.MusicCard card;          // 卡片目前的位置（音量變了只換音量那張圖）
+        double shownVolume = -1;           // 卡片上顯示的音量（0～1）
+        double shownVolumeLevel = -1;      // 音量那張圖的亮度（找不到 Spotify 的聲音時變暗）
+        double audibleVolume = 0.5;        // 最近一次不是 0 的音量（按喇叭取消靜音時回到這裡）
+        bool volumeFound, draggingVolume;
+        bool volumeExpanded;               // 音量滑桿展開中（平常只有喇叭）
+        DispatcherTimer hoverTimer, collapseTimer;
+        int volumeSetTick, wheel;          // 最近一次調音量的時間；滾輪還沒用掉的量
+
         // 歌詞
         bool lyricsOn;                     // 按了歌詞按鈕才顯示（換歌也繼續顯示）；鎖定畫面收起來就關掉，下次要再按一次
         DispatcherTimer lyricsTimer;
@@ -2643,10 +3077,15 @@ namespace VideoWallpaper
                 if (screen.Primary || primary == null) primary = w;
             }
             primary.Click = OnClick;
+            primary.Hover = OnHover;
+            primary.Drag = OnDrag;
+            primary.Drop = OnDrop;
+            primary.Wheel = OnWheel;
             LockWindow.ResetCursor();
             Attach(engine);
             if (ActiveChanged != null) ActiveChanged();
             NowPlaying.Start(delegate { if (Active) UpdateClock(true); });   // 開始讀 Spotify 正在播放的歌
+            SpotifyVolume.Start();                                            // 和 Spotify 的音量
 
             // 趁控制面板（我們自己的視窗）還在前景，先把前景交給鎖定畫面，鍵盤輸入才會進來；
             // 視窗這時在螢幕正上方，看不到。面板失去前景後會自己收起來。
@@ -2669,6 +3108,12 @@ namespace VideoWallpaper
                 }
             };
             clockTimer.Start();
+
+            // 音量滑桿：滑鼠在喇叭上停 0.5 秒展開，離開 1 秒收起來
+            hoverTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            hoverTimer.Tick += delegate { hoverTimer.Stop(); if (Active && volumeFound && PointerOver(false)) ExpandVolume(true); };
+            collapseTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1000) };
+            collapseTimer.Tick += delegate { collapseTimer.Stop(); if (Active && !draggingVolume && !PointerOver(true)) ExpandVolume(false); };
 
             // 稍等影片第一格畫好，再從上面滑下來
             After(150, delegate
@@ -2716,69 +3161,240 @@ namespace VideoWallpaper
             // 歌詞按鈕的亮度：顯示中全白、有歌詞但沒開半亮、沒有歌詞很暗
             double micLevel = !Lyrics.Has(lyrics) ? 0.25 : lyricsOn ? 1.0 : 0.6;
 
+            // Spotify 的音量（背景每半秒讀一次）：拖曳中、剛調過的 1.5 秒內不看（Spotify 還沒反應過來，讀到的會是舊的）
+            double volume = Math.Max(0, shownVolume);
+            if (track != null && !draggingVolume && Environment.TickCount - volumeSetTick > 1500)
+            {
+                volumeFound = SpotifyVolume.Found;
+                if (volumeFound)
+                {
+                    volume = Math.Round(SpotifyVolume.Level * 100) / 100;
+                    if (volume > 0) audibleVolume = volume;
+                }
+            }
+            double volumeLevel = volumeFound ? 1.0 : 0.25;   // 找不到 Spotify 的音量條（例如 Spotify 的視窗關掉了）就變暗
+
             // 右下角的音樂卡片：換歌、播放或暫停、封面變了才重畫；沒在播就拿掉
             string musicKey = NowPlaying.Key;
             if (force || musicKey != shownMusic)
             {
                 shownMusic = musicKey;
                 var found = new List<KeyValuePair<Rect, string>>();
-                int[] info, mic;
-                var music = LockClock.RenderMusic(primary.Bounds.Width, primary.Bounds.Height, found, out info, out mic, out w, out h, out x, out y);
+                card = LockClock.RenderMusic(primary.Bounds.Width, primary.Bounds.Height, volume, found);
+                var c = card ?? new LockClock.MusicCard();   // 沒在播：每張圖都是 null，拿掉
                 // 卡片底下是毛玻璃：卡片範圍＝圖扣掉四周留給陰影的空間
                 int shadow = LockClock.ShadowPad(primary.Bounds.Height);
-                int cardX = x + shadow, cardY = y + shadow, cardW = w - 2 * shadow, cardH = h - 2 * shadow;
-                engine.SetGlassOverlay(primary.Handle, "music", music, w, h, x, y,
-                    cardX, cardY, cardW, cardH, LockClock.CardRadius(primary.Bounds.Height / 1080.0));
+                engine.SetGlassOverlay(primary.Handle, "music", c.Chrome, c.Width, c.Height, c.X, c.Y,
+                    c.X + shadow, c.Y + shadow, c.Width - 2 * shadow, c.Height - 2 * shadow, LockClock.CardRadius(primary.Bounds.Height / 1080.0));
 
                 // 封面、歌名、歌手：換歌時像翻頁一樣，舊的往左滑出、新的從右邊滑進來，兩張一起移動、間距不變，
                 // 移動距離剛好一張卡片寬，舊的完全離開卡片時新的剛好就定位（按「上一首」換回來的話方向相反）
                 string song = track == null ? null : Lyrics.SongKey(track);
                 int shift = 0;
-                if (music != null && shownSong != null && song != shownSong)
+                if (card != null && shownSong != null && song != shownSong)
                 {
                     bool back = NowPlaying.LastCommand == "prev" && Environment.TickCount - NowPlaying.LastCommandTick < 5000;
-                    shift = back ? -cardW : cardW;
+                    shift = (back ? -1 : 1) * (c.Width - 2 * shadow);
                 }
-                engine.SetSlideOverlay(primary.Handle, "musicInfo", info, w, h, x, y, 1, cardX, cardY, cardW, cardH, shift, 450, 1, 0);
-                // 歌詞按鈕跟著一起滑；亮度變了的話慢慢變亮或變暗
-                engine.SetSlideOverlay(primary.Handle, "musicMic", mic, w, h, x, y, 1, cardX, cardY, cardW, cardH, shift, 450, micLevel, 300);
+                SetCardLayer("musicInfo", c.Info, shift, 1, 0);
+                // 歌詞按鈕、音量跟著一起滑；亮度變了的話慢慢變亮或變暗
+                SetCardLayer("musicMic", c.Mic, shift, micLevel, 300);
+                SetCardLayer("musicVolume", c.Volume, shift, volumeLevel, 300);
+                SetVolumeBarLayer(c.VolumeBar, shift, volumeLevel, volume);
                 shownMicLevel = micLevel;
-                shownSong = music == null ? null : song;
-                if (music != null)
+                shownVolume = volume;
+                shownVolumeLevel = volumeLevel;
+                shownSong = card == null ? null : song;
+                if (card != null)
                 {
-                    musicTop = y + LockClock.ShadowPad(primary.Bounds.Height);
-                    musicLeft = x + LockClock.ShadowPad(primary.Bounds.Height);
+                    musicTop = c.Y + shadow;
+                    musicLeft = c.X + shadow;
                 }
                 buttons.Clear();
                 buttons.AddRange(found);
             }
-            else if (micLevel != shownMicLevel)
+            else
             {
                 // 只有歌詞按鈕的狀態變了（開關歌詞、查到歌詞）：不用重畫卡片，亮度花 0.3 秒慢慢變
-                engine.FadeOverlay(primary.Handle, "musicMic", micLevel, 300, false);
-                shownMicLevel = micLevel;
+                if (micLevel != shownMicLevel)
+                {
+                    engine.FadeOverlay(primary.Handle, "musicMic", micLevel, 300, false);
+                    shownMicLevel = micLevel;
+                }
+                // 找不到 / 又找到 Spotify 的音量條：喇叭和滑桿慢慢變暗或變亮
+                if (volumeLevel != shownVolumeLevel)
+                {
+                    engine.FadeOverlay(primary.Handle, "musicVolume", volumeLevel, 300, false);
+                    engine.FadeOverlay(primary.Handle, "musicVolumeBar", volumeLevel, 300, false);
+                    shownVolumeLevel = volumeLevel;
+                }
+                // 音量在別的地方被調了（在 Spotify 裡調的）：只重畫音量那兩張
+                ShowVolume(volume);
             }
             UpdateLyrics();
         }
 
-        // 點到「正在播放」的按鈕：控制 Spotify 或切換歌詞，鎖定畫面不滑走（變暗的歌詞按鈕按了也不會滑走）
+        // 卡片上跟著換歌一起滑動的圖（只在卡片範圍內看得到）；pixels 是 null 就拿掉。
+        // revealW > 0：可以展開 / 收起的圖（音量滑桿），reveal 是新放上去時展開的程度
+        void SetCardLayer(string name, int[] pixels, int shift, double opacity, int fadeMs,
+            int revealX = 0, int revealW = 0, double reveal = 1, double pivot = 0, double pivotW = 0)
+        {
+            var c = card ?? new LockClock.MusicCard();
+            int shadow = LockClock.ShadowPad(primary.Bounds.Height);
+            engine.SetSlideOverlay(primary.Handle, name, pixels, c.Width, c.Height, c.X, c.Y, 1,
+                c.X + shadow, c.Y + shadow, c.Width - 2 * shadow, c.Height - 2 * shadow, shift, 450, opacity, fadeMs, revealX, revealW, reveal, pivot, pivotW);
+        }
+
+        // 音量滑桿那張：可以展開 / 收起，展開時從喇叭旁邊長出來（把手的位置跟著音量，展開時把手保持原樣）
+        void SetVolumeBarLayer(int[] pixels, int shift, double opacity, double volume)
+        {
+            var c = card ?? new LockClock.MusicCard();
+            SetCardLayer("musicVolumeBar", pixels, shift, opacity, 300, c.RevealX, c.RevealW, volumeExpanded ? 1 : 0,
+                c.KnobX(volume), c.KnobRadius + Math.Max(1, Math.Round(primary.Bounds.Height / 1080.0 * 2)));
+        }
+
+        // 卡片上的音量改成 volume（只重畫喇叭和滑桿那兩張）
+        void ShowVolume(double volume)
+        {
+            if (card == null || engine == null || volume == shownVolume) return;
+            shownVolume = volume;
+            int[] bar;
+            SetCardLayer("musicVolume", LockClock.RenderVolume(volume, out bar), 0, shownVolumeLevel, 300);
+            SetVolumeBarLayer(bar, 0, shownVolumeLevel, volume);
+        }
+
+        // 展開 / 收起音量滑桿（從喇叭旁邊長出來、淡入；收起時縮回喇叭、淡出）
+        void ExpandVolume(bool expand)
+        {
+            if (hoverTimer != null) hoverTimer.Stop();
+            if (collapseTimer != null) collapseTimer.Stop();
+            if (expand == volumeExpanded || card == null || engine == null) return;
+            volumeExpanded = expand;
+            engine.RevealOverlay(primary.Handle, "musicVolumeBar", expand ? 1 : 0, expand ? 380 : 260);
+        }
+
+        // 滑鼠在喇叭上停 0.5 秒展開滑桿；展開後離開喇叭和滑桿 1 秒就收起來
+        void OnHover(int x, int y)
+        {
+            if (card == null || busy || hoverTimer == null) return;
+            if (!volumeExpanded)
+            {
+                if (ButtonAt("mute", x, y)) { if (!hoverTimer.IsEnabled && volumeFound) hoverTimer.Start(); }
+                else hoverTimer.Stop();
+            }
+            else if (draggingVolume || ButtonAt("mute", x, y) || ButtonAt("volume", x, y)) collapseTimer.Stop();
+            else if (!collapseTimer.IsEnabled) collapseTimer.Start();
+        }
+
+        bool ButtonAt(string action, int x, int y)
+        {
+            foreach (var b in buttons) if (b.Value == action && b.Key.Contains(x, y)) return true;
+            return false;
+        }
+
+        // 游標現在在不在喇叭上（includeBar：或展開的滑桿上）
+        bool PointerOver(bool includeBar)
+        {
+            if (primary == null || !LockWindow.CursorShown) return false;
+            Native.POINT p;
+            Native.GetCursorPos(out p);
+            int x = p.X - primary.Bounds.X, y = p.Y - primary.Bounds.Y;
+            return ButtonAt("mute", x, y) || (includeBar && ButtonAt("volume", x, y));
+        }
+
+        // 按喇叭：靜音，或回到靜音前的音量（用 Spotify 自己的靜音鈕，它記得確切的音量）
+        void ToggleMute()
+        {
+            if (hoverTimer != null) hoverTimer.Stop();   // 按了就不要再展開
+            double expected = shownVolume > 0 ? 0 : audibleVolume;
+            volumeSetTick = Environment.TickCount;
+            SpotifyVolume.ToggleMute(expected);
+            ShowVolume(expected);
+        }
+
+        // 調 Spotify 的音量（0～1，一格 10%，跟 Spotify 音量條從外面調的單位一樣），卡片上的滑桿馬上跟著動
+        void SetVolume(double volume)
+        {
+            volume = Math.Round(Math.Round(Math.Max(0, Math.Min(1, volume)) / SpotifyVolume.Step) * SpotifyVolume.Step, 2);
+            volumeSetTick = Environment.TickCount;
+            if (volume > 0) audibleVolume = volume;
+            if (volume == shownVolume) return;
+            SpotifyVolume.Set(volume);
+            ShowVolume(volume);
+        }
+
+        // 點到「正在播放」的按鈕：控制 Spotify、切換歌詞或調音量，鎖定畫面不滑走（變暗的按鈕按了也不會滑走）
         bool OnClick(int x, int y)
         {
             if (busy) return false;
             foreach (var b in buttons)
                 if (b.Key.Contains(x, y))
                 {
-                    if (b.Value != "lyrics") NowPlaying.Command(b.Value);
-                    else if (Lyrics.Has(lyrics))
+                    if (b.Value == "lyrics")
                     {
-                        // 先讓歌詞開始淡入 / 淡出，再更新按鈕的樣子（只重畫「正在播放」那一塊）
-                        lyricsOn = !lyricsOn;
-                        UpdateLyrics();
-                        UpdateClock(false);
+                        if (Lyrics.Has(lyrics))
+                        {
+                            // 先讓歌詞開始淡入 / 淡出，再更新按鈕的樣子（只重畫「正在播放」那一塊）
+                            lyricsOn = !lyricsOn;
+                            UpdateLyrics();
+                            UpdateClock(false);
+                        }
                     }
+                    else if (b.Value == "mute")
+                    {
+                        if (volumeFound) ToggleMute();
+                    }
+                    else if (b.Value == "volume")
+                    {
+                        if (!volumeExpanded) continue;   // 滑桿收起來時這裡是空的，當作沒點到按鈕
+                        if (volumeFound)
+                        {
+                            // 點到哪裡就調到哪裡，按著不放可以左右拖曳（每跨過一格 Spotify 就跟著變）
+                            draggingVolume = true;
+                            primary.StartDrag();
+                            SetVolume((x - card.TrackLeft) / card.TrackWidth);
+                        }
+                    }
+                    else NowPlaying.Command(b.Value);
                     return true;
                 }
             return false;
+        }
+
+        void OnDrag(int x, int y)
+        {
+            if (!draggingVolume || card == null || card.TrackWidth <= 0) return;
+            // 左鍵已經放開（放開的訊息被別的視窗收走了，例如在別的螢幕上放開）：拖曳結束
+            if (!LockWindow.LeftButtonDown()) { OnDrop(); return; }
+            SetVolume((x - card.TrackLeft) / card.TrackWidth);
+        }
+
+        void OnDrop()
+        {
+            if (!draggingVolume) return;
+            draggingVolume = false;
+            volumeSetTick = Environment.TickCount;
+            if (primary != null) primary.EndDrag();
+            if (collapseTimer != null && !PointerOver(true)) collapseTimer.Start();   // 在滑桿外面放開：1 秒後收起來
+        }
+
+        // 滑鼠滾輪在卡片上：轉一格（120）調 10%（觸控板轉得比較細，累積到一格再調）
+        bool OnWheel(int x, int y, int delta)
+        {
+            if (busy || card == null || !volumeFound) return false;
+            int shadow = LockClock.ShadowPad(primary.Bounds.Height);
+            if (x < card.X + shadow || x >= card.X + card.Width - shadow || y < card.Y + shadow || y >= card.Y + card.Height - shadow) return false;
+            // 滾輪也會展開滑桿（看得到調到多少），停下來、游標不在喇叭和滑桿上的話 1 秒後收起來
+            ExpandVolume(true);
+            if (collapseTimer != null && !PointerOver(true)) collapseTimer.Start();
+            wheel += delta;
+            int steps = wheel / 120;
+            if (steps != 0)
+            {
+                wheel -= steps * 120;
+                SetVolume(shownVolume + steps * SpotifyVolume.Step);
+            }
+            return true;
         }
 
         // 歌詞要不要顯示：要的話放上這首歌的長圖（淡入）、開計時器跟著播放進度捲動；
@@ -2871,7 +3487,28 @@ namespace VideoWallpaper
         // 切到別的程式（Alt+Tab、Win 鍵）、Alt+F4：一樣滑走
         void OnLeave()
         {
+            // 剛調過音量：是 Spotify 自己跳到前景（從外面設定它的音量時會這樣），不是使用者切走。
+            // 鎖定畫面本來就蓋在最上層，不收起來，稍等一下把前景拿回來（拿不回來也沒關係，空白鍵 / Enter / Esc 有另外登記）
+            if (Active && Environment.TickCount - volumeSetTick < 2000)
+            {
+                After(150, TakeForeground);
+                return;
+            }
             OnDismiss();
+        }
+
+        // 把前景拿回鎖定畫面。Windows 不讓背景程式直接搶前景，
+        // 所以暫時把這條執行緒的輸入接到現在的前景視窗（Spotify）上，再設定前景
+        void TakeForeground()
+        {
+            if (!Active || primary == null) return;
+            IntPtr foreground = Native.GetForegroundWindow();
+            if (foreground == primary.Handle) return;
+            int pid, me = Native.GetCurrentThreadId();
+            int thread = Native.GetWindowThreadProcessId(foreground, out pid);
+            bool attached = thread != 0 && thread != me && Native.AttachThreadInput(me, thread, true);
+            Native.SetForegroundWindow(primary.Handle);
+            if (attached) Native.AttachThreadInput(me, thread, false);
         }
 
         // 收起來（滑走之後，或電腦被 Win+L 鎖定、睡眠時直接收掉）
@@ -2887,7 +3524,13 @@ namespace VideoWallpaper
             lyricsOn = false;   // 下次打開鎖定畫面時歌詞先不出現，等按了按鈕再顯示
             shownSong = null;   // 下次打開時卡片直接出現，不播換歌動畫
             shownMicLevel = -1;
+            card = null;
+            shownVolume = shownVolumeLevel = -1;
+            volumeFound = draggingVolume = volumeExpanded = false;
+            if (hoverTimer != null) { hoverTimer.Stop(); collapseTimer.Stop(); }
+            wheel = 0;
             NowPlaying.Stop();
+            SpotifyVolume.Stop();
             buttons.Clear();
             if (primary != null) foreach (var hotkey in HotKeys) Native.UnregisterHotKey(primary.Handle, hotkey);   // 還給其他程式
             primary = null;

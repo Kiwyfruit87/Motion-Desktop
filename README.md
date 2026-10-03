@@ -67,6 +67,13 @@ Turning the option off removes it. Only if creating the task fails does it fall 
   - Lyrics come from [LRCLIB](https://lrclib.net) (a free, public, community lyrics database). The song title, artist, album and duration are sent to look them up.
   - When no lyrics are found, or for instrumentals and podcasts, the button is dimmed and does nothing.
   - Time-synced lyrics follow the singing precisely. Plain lyrics (without timestamps) scroll evenly over the song's length without highlighting a line.
+- The **speaker button** next to the playback buttons controls Spotify's own volume (the volume bar inside Spotify, not the Windows volume or volume mixer):
+  - Click it to mute; click again to go back to the exact volume before muting (it presses Spotify's own mute button).
+  - Hover over it for half a second and a volume slider grows out of it. Click or drag the slider; Spotify follows while you drag.
+    The mouse wheel over the card also changes the volume. The slider tucks back in a second after the mouse leaves.
+  - It works through Windows UI Automation (the accessibility interface screen readers use) on Spotify's volume bar,
+    so it changes in 10% steps, the finest step Spotify's volume bar accepts from outside.
+  - If Spotify's volume bar can't be found (for example, Spotify's window is closed), the button is dimmed.
 - The mouse cursor only appears when you move the mouse and hides after 2.5 seconds.
 - The clock font is Google Sans Flex (in the `fonts` folder, SIL Open Font License, see `fonts\OFL.txt`).
 - Weather: the rough location is found from your IP address with ipapi.co (fallback: ipwho.is), then the weather comes from Open-Meteo, updated at most every 20 minutes.
@@ -173,6 +180,13 @@ H.264 `.mp4` is recommended. `.wmv` works too. HEVC (H.265) requires the HEVC ex
   - 歌詞來自 [LRCLIB](https://lrclib.net)（免費公開的社群歌詞資料庫），會把歌名、歌手、專輯、歌曲長度送去查詢。
   - 查不到歌詞、純音樂、Podcast 時，按鈕會變暗，按了也沒反應。
   - 有時間標記的歌詞會準確跟著唱；只有一般歌詞（沒有時間標記）的話，照歌曲長度平均慢慢捲，不會特別強調哪一行。
+- 播放按鈕旁邊的**喇叭按鈕**調的是 Spotify 自己的音量（Spotify 程式裡的音量條，不是 Windows 的音量或音量混音器）：
+  - 按一下靜音；再按一下回到靜音前的確切音量（按的是 Spotify 自己的靜音鈕）。
+  - 滑鼠停在喇叭上半秒，音量條會從喇叭旁邊長出來，可以點或拖曳，拖的時候 Spotify 會即時跟上；
+    在卡片上滾滑鼠滾輪也能調。滑鼠離開一秒後音量條會縮回去。
+  - 是透過 Windows 的協助工具介面（UI Automation，螢幕閱讀器用的那套）操作 Spotify 的音量條，
+    所以一格是 10%（Spotify 的音量條從外面設定時最細就是這樣）。
+  - 找不到 Spotify 的音量條時（例如 Spotify 的視窗關掉了），按鈕會變暗。
 - 移動滑鼠時才會出現游標，停 2.5 秒自動隱藏。
 - 時鐘字體是 Google Sans Flex（放在 `fonts` 資料夾，SIL Open Font License，授權條款見 `fonts\OFL.txt`）。
 - 天氣：先用 ipapi.co（備用 ipwho.is）依網路 IP 查大概位置，再向 Open-Meteo 查天氣，每 20 分鐘最多更新一次。
