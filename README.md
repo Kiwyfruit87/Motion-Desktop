@@ -9,12 +9,26 @@ Set a video as your Windows desktop wallpaper. Works on Windows 10 and Windows 1
 Download `MotionDesktop-vX.X.X.zip` from [Releases](https://github.com/Kiwyfruit87/Motion-Desktop/releases), unzip it, and double-click `VideoWallpaper.exe`.
 Keep the `fonts` folder next to the exe (it holds the lock screen clock font).
 
-The exe is not digitally signed, so Windows SmartScreen or your antivirus may show a warning. Choose "Run anyway", or build it yourself from source (see below).
+### If Windows shows a warning
+
+The exe is not digitally signed (a signing certificate costs a yearly fee), so Windows can't confirm who made it:
+
+- A blue "Windows protected your PC" (SmartScreen) screen may appear. Click **More info** → **Run anyway**.
+- Your antivirus may also ask; allow it, or build it yourself from source (see below).
+
+To avoid these prompts for everything in the ZIP, right-click the downloaded ZIP **before unzipping** → **Properties** →
+tick **Unblock** at the bottom → **OK**, then unzip. (Windows marks downloaded files as "from the internet",
+and files unzipped from a marked ZIP inherit the mark.)
 
 ## Build
 
 Nothing to install: double-click `build.cmd`. It uses the C# compiler that ships with Windows (.NET Framework 4.x)
 and creates `VideoWallpaper.exe` in the same folder.
+
+If you downloaded the source as a ZIP from GitHub, double-clicking `build.cmd` may show
+"Open File - Security Warning: The publisher could not be verified". This is the same "from the internet" mark, not a problem with the file:
+click **Run** (untick "Always ask before opening this file" so it won't ask again), or unblock the ZIP before unzipping as described above.
+`build.cmd` is only a few lines that call the built-in compiler; you can open it in Notepad to check.
 
 ## Usage
 
@@ -126,12 +140,25 @@ H.264 `.mp4` is recommended. `.wmv` works too. HEVC (H.265) requires the HEVC ex
 到 [Releases](https://github.com/Kiwyfruit87/Motion-Desktop/releases) 下載 `MotionDesktop-vX.X.X.zip`，解壓縮後雙擊 `VideoWallpaper.exe`。
 `fonts` 資料夾要跟 exe 放在一起（鎖定畫面時鐘用的字體）。
 
-這個 exe 沒有數位簽章，Windows SmartScreen 或防毒軟體可能會跳出警告，選「仍要執行」即可；也可以照下面的方式自己編譯。
+### 如果 Windows 跳出警告
+
+這個 exe 沒有數位簽章（簽章憑證每年要付費），Windows 沒辦法確認是誰做的：
+
+- 可能會出現藍色的「Windows 已保護您的電腦」（SmartScreen），按 **其他資訊** → **仍要執行**。
+- 防毒軟體也可能會詢問，選允許即可；或照下面的方式自己編譯。
+
+想讓 ZIP 裡的檔案都不再跳警告：**解壓縮之前**，在下載的 ZIP 上按右鍵 → **內容** →
+勾選最下面的 **解除封鎖** → **確定**，再解壓縮。（Windows 會在下載的檔案上做「來自網路」的記號，
+從有記號的 ZIP 解壓出來的檔案也會帶著這個記號。）
 
 ## 編譯
 
 不需要安裝任何東西：雙擊 `build.cmd`，它會用 Windows 內建的 C# 編譯器（.NET Framework 4.x）
 在同一個資料夾產生 `VideoWallpaper.exe`。
+
+如果原始碼是從 GitHub 下載 ZIP 解壓的，雙擊 `build.cmd` 時可能會出現「開啟檔案 - 安全性警告：無法確認發行者」。
+這也是上面說的「來自網路」記號，不是檔案有問題：按 **執行** 即可（把「開啟這個檔案前一定要先詢問」取消勾選，下次就不會再問），
+或照上面的方式先解除 ZIP 的封鎖再解壓縮。`build.cmd` 只有幾行，作用是呼叫內建的編譯器，可以用記事本打開確認。
 
 ## 使用方式
 
