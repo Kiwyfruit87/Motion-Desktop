@@ -66,6 +66,9 @@ namespace VideoWallpaper
         [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr hWnd, out int processId);
         [DllImport("user32.dll")] public static extern bool AttachThreadInput(int thread, int attachTo, bool attach);
         [DllImport("kernel32.dll")] public static extern int GetCurrentThreadId();
+        [DllImport("kernel32.dll")] public static extern IntPtr OpenThread(uint access, bool inherit, int threadId);
+        [DllImport("kernel32.dll")] public static extern int GetProcessIdOfThread(IntPtr thread);
+        [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextLength(IntPtr hWnd);
         [DllImport("user32.dll")] public static extern bool SetLayeredWindowAttributes(IntPtr hWnd, uint colorKey, byte alpha, uint flags);
         [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
@@ -654,8 +657,11 @@ namespace VideoWallpaper
             setTransform(brush, ref m);
             setOpacity(brush, (float)opacity);
             var rect = new RoundedRect { Rect = new RectF { Left = (float)x, Top = (float)y, Right = (float)(x + w), Bottom = (float)(y + h) }, RadiusX = (float)radius, RadiusY = (float)radius };
-            Method<FillRoundedRectangleFn>(target, 19)(target, ref rect, brush);   // ID2D1RenderTarget::FillRoundedRectangle
+            if (fillRounded == null) fillRounded = Method<FillRoundedRectangleFn>(target, 19);   // ID2D1RenderTarget::FillRoundedRectangle（每一格都會用，記起來）
+            fillRounded(target, ref rect, brush);
         }
+
+        FillRoundedRectangleFn fillRounded;
 
         bool CreateBlurResources(int w, int h)
         {
@@ -1686,6 +1692,7 @@ namespace VideoWallpaper
         static WeatherInfo current;
         static double lat = double.NaN, lon = double.NaN;
         static volatile bool fetching;
+        static int failedTick;   // 上次查詢失敗的時間（0 = 沒失敗）：失敗後隔 2 分鐘才再試，斷網、服務限流時不要每秒一直查
 
         public static WeatherInfo Current { get { return current; } }
 
@@ -1697,14 +1704,16 @@ namespace VideoWallpaper
                 && double.TryParse(parts[1].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out b)) { lat = a; lon = b; }
         }
 
-        // 超過 20 分鐘沒更新才重新查；查到後在 UI 執行緒呼叫 onUpdated
+        // 超過 20 分鐘沒更新才重新查（上次失敗的話隔 2 分鐘）；查到後在 UI 執行緒呼叫 onUpdated
         public static void Refresh(Action onUpdated)
         {
             if (fetching || (current != null && (DateTime.Now - current.Fetched).TotalMinutes < 20)) return;
+            if (failedTick != 0 && Environment.TickCount - failedTick < 120000) return;
             fetching = true;
             var ui = Dispatcher.CurrentDispatcher;
             ThreadPool.QueueUserWorkItem(delegate
             {
+                bool ok = false;
                 try
                 {
                     ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;   // TLS 1.2
@@ -1721,10 +1730,15 @@ namespace VideoWallpaper
                         IsDay = Convert.ToInt32(now["is_day"], inv) == 1,
                         Fetched = DateTime.Now,
                     };
+                    ok = true;
                     if (onUpdated != null) ui.BeginInvoke(onUpdated);
                 }
                 catch { }
-                finally { fetching = false; }
+                finally
+                {
+                    failedTick = ok ? 0 : Environment.TickCount | 1;   // | 1：剛好算出 0 時也要記得失敗過
+                    fetching = false;
+                }
             });
         }
 
@@ -1988,6 +2002,7 @@ namespace VideoWallpaper
         static readonly AutoResetEvent wake = new AutoResetEvent(false);
         static Thread worker;
         static bool running;
+        static bool wanted = true;    // 卡片上顯示的是 Spotify（不是的話不用一直讀，Spotify 也不用一直維持協助工具模式）
         static double pending = -1;   // 等著要設定的音量（-1 = 沒有）
         static bool pendingMute;      // 等著要按 Spotify 的靜音鈕
         static double level = -1;     // 最近讀到的音量（-1 = 找不到 Spotify 的音量條）
@@ -2014,6 +2029,17 @@ namespace VideoWallpaper
 
         public static void Stop() { lock (gate) { running = false; pending = -1; pendingMute = false; } }
 
+        // 卡片上是不是 Spotify：不是的話暫停讀取，換回 Spotify 時馬上讀一次
+        public static void SetWanted(bool value)
+        {
+            lock (gate)
+            {
+                if (wanted == value) return;
+                wanted = value;
+            }
+            if (value) wake.Set();
+        }
+
         // 設定音量（0～1，會對齊到 10% 一格）；拖曳時連續呼叫的話，背景只會設最後一次
         public static void Set(double volume)
         {
@@ -2034,7 +2060,7 @@ namespace VideoWallpaper
             while (true)
             {
                 bool on;
-                lock (gate) on = running;
+                lock (gate) on = running && wanted;
                 wake.WaitOne(on ? 500 : Timeout.Infinite);
                 double target;
                 bool mute;
@@ -2045,6 +2071,7 @@ namespace VideoWallpaper
                     mute = pendingMute;
                     pending = -1;
                     pendingMute = false;
+                    if (!wanted && target < 0 && !mute) continue;   // 卡片上不是 Spotify、也沒有要設定什麼：不讀
                 }
                 double result = Access(target, mute);
                 lock (gate) level = result;
@@ -2162,8 +2189,10 @@ namespace VideoWallpaper
         }
 
         static readonly Dictionary<string, Result> cache = new Dictionary<string, Result>();
+        static readonly Queue<string> cacheOrder = new Queue<string>();   // 查過的歌（先查的在前面），只留最近 50 首
+        const int CacheLimit = 50;
         static readonly HashSet<string> loading = new HashSet<string>();
-        static readonly Queue<Result> sheets = new Queue<Result>();   // 有長圖的歌（一張好幾 MB，只留最近 3 首）
+        static readonly List<Result> sheets = new List<Result>();   // 有長圖的歌（一張好幾 MB，只留最近畫的 3 首；同一首只會出現一次）
         static readonly object gate = new object();
 
         public static string SongKey(NowPlaying.Track track) { return track.Title + "\n" + track.Artist; }
@@ -2199,7 +2228,22 @@ namespace VideoWallpaper
                     r.When = DateTime.UtcNow;
                 }
                 if (Has(r)) DrawSheet(r, screenHeight);
-                lock (gate) { cache[key] = r; loading.Remove(key); }
+                lock (gate)
+                {
+                    if (!cache.ContainsKey(key)) cacheOrder.Enqueue(key);
+                    cache[key] = r;
+                    loading.Remove(key);
+                    // 查過的歌太多了：最早查的拿掉（程式開很久時記憶體才不會一直變大）
+                    while (cache.Count > CacheLimit && cacheOrder.Count > 0)
+                    {
+                        Result old;
+                        string oldest = cacheOrder.Dequeue();
+                        if (oldest == key) { cacheOrder.Enqueue(key); continue; }   // 現在這首不拿掉，排回最後面
+                        if (!cache.TryGetValue(oldest, out old)) continue;
+                        cache.Remove(oldest);
+                        if (sheets.Remove(old)) old.Sheet = null;
+                    }
+                }
                 ui.BeginInvoke(loaded);
             });
             return cached;
@@ -2220,8 +2264,10 @@ namespace VideoWallpaper
                     {
                         r.SheetWidth = w; r.SheetHeight = h; r.Centers = centers; r.Spacing = spacing; r.SheetFor = screenHeight;
                         r.Sheet = pixels;
-                        sheets.Enqueue(r);
-                        while (sheets.Count > 3) sheets.Dequeue().Sheet = null;
+                        // 移到最後面（重畫的歌原本就在清單裡的話先拿掉，才不會有兩筆、清掉舊的那筆時把剛畫好的長圖也清掉）
+                        sheets.Remove(r);
+                        sheets.Add(r);
+                        while (sheets.Count > 3) { sheets[0].Sheet = null; sheets.RemoveAt(0); }
                     }
                 }
                 catch { }
@@ -2377,30 +2423,31 @@ namespace VideoWallpaper
         static readonly FontFamily IconFont = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets");
 
         // 時間或天氣有變才需要重畫時鐘那張圖
-        public static string ClockKey()
+        // now：同一個時間點（時間、AM / PM、日期都用它，跨過整點或午夜的那一瞬間才不會兜不起來）
+        public static string ClockKey(DateTime now)
         {
-            return TimeText() + AmPmText() + DateText() + (Weather.Current == null ? "" : Weather.Current.Fetched.Ticks.ToString());
+            return TimeText(now) + AmPmText(now) + DateText(now) + (Weather.Current == null ? "" : Weather.Current.Fetched.Ticks.ToString());
         }
 
         // 時間下面的日期（英文）：「Friday, October 3」
-        static string DateText()
+        static string DateText(DateTime now)
         {
-            return DateTime.Now.ToString("dddd, MMMM d", CultureInfo.InvariantCulture);
+            return now.ToString("dddd, MMMM d", CultureInfo.InvariantCulture);
         }
 
         // 12 小時制：「9:02」＋ 後面小一號的「AM / PM」
-        static string TimeText()
+        static string TimeText(DateTime now)
         {
-            return DateTime.Now.ToString("h:mm", CultureInfo.InvariantCulture);
+            return now.ToString("h:mm", CultureInfo.InvariantCulture);
         }
 
-        static string AmPmText()
+        static string AmPmText(DateTime now)
         {
-            return DateTime.Now.Hour < 12 ? "AM" : "PM";
+            return now.Hour < 12 ? "AM" : "PM";
         }
 
-        // 左下角：時鐘和天氣，下面一行日期
-        public static int[] RenderClock(int screenHeight, out int width, out int height, out int x, out int y)
+        // 左下角：時鐘和天氣，下面一行日期（now 跟算 ClockKey 時用同一個時間點）
+        public static int[] RenderClock(DateTime now, int screenHeight, out int width, out int height, out int x, out int y)
         {
             double s = screenHeight / 1080.0;
             double timeSize = Math.Round(92 * s), ampmSize = Math.Round(34 * s), tempSize = Math.Round(40 * s);
@@ -2408,11 +2455,11 @@ namespace VideoWallpaper
 
             var text = new TextBlock { FontFamily = ClockFont, Foreground = Brushes.White };
             TextOptions.SetTextFormattingMode(text, TextFormattingMode.Ideal);
-            text.Inlines.Add(new Run(TimeText()) { FontSize = timeSize });
+            text.Inlines.Add(new Run(TimeText(now)) { FontSize = timeSize });
             // AM / PM 跟時間數字的底部對齊。字小，用中等粗細才不會比大數字顯得單薄；
             // 前面的空格用較大的字級，讓它跟數字之間多留一點距離
             text.Inlines.Add(new Run(" ") { FontSize = Math.Round(48 * s) });
-            text.Inlines.Add(new Run(AmPmText()) { FontSize = ampmSize, FontWeight = FontWeights.Medium });
+            text.Inlines.Add(new Run(AmPmText(now)) { FontSize = ampmSize, FontWeight = FontWeights.Medium });
             var weather = Weather.Current;
             if (weather != null)
             {
@@ -2426,7 +2473,7 @@ namespace VideoWallpaper
             // 時間下面一行小字的日期（大數字的行高下面留很多空，往上拉近一點）
             var date = new TextBlock
             {
-                Text = DateText(), FontFamily = ClockFont, FontSize = Math.Round(26 * s), FontWeight = FontWeights.Medium,
+                Text = DateText(now), FontFamily = ClockFont, FontSize = Math.Round(26 * s), FontWeight = FontWeights.Medium,
                 Foreground = new SolidColorBrush(Color.FromArgb(0xE6, 255, 255, 255)),
                 Margin = new Thickness(Math.Round(4 * s), -Math.Round(12 * s), 0, 0),
             };
@@ -3088,7 +3135,8 @@ namespace VideoWallpaper
     // 鎖定畫面的全螢幕視窗（每個螢幕一個），影片直接由播放引擎畫進來
     class LockWindow : WinForms.NativeWindow
     {
-        public Action Dismiss, Leave, Exposed;
+        public Action Dismiss, Exposed;
+        public Action<int> Leave;            // 被切到別的程式（參數：切過去的那個程式的執行緒；Alt+F4 時是 0）
         public Func<int, int, bool> Click;   // 回傳 true = 點到「正在播放」的按鈕，不要滑走
         public Action<int, int> Hover;       // 滑鼠移動（停在喇叭上展開音量條用）
         public Action<int, int> Drag;        // 按著左鍵拖曳音量滑桿（StartDrag 之後才會收到）
@@ -3207,11 +3255,11 @@ namespace VideoWallpaper
                 case 0x0312:   // WM_HOTKEY：鎖定畫面顯示時登記的空白鍵 / Enter / Esc（不管前景在哪個視窗都收得到）
                     if (Dismiss != null) Dismiss();
                     return;
-                case 0x001C:   // WM_ACTIVATEAPP：被切到別的程式（Alt+Tab、Win 鍵、Ctrl+Alt+Del…）
-                    if (m.WParam == IntPtr.Zero && Leave != null) Leave();
+                case 0x001C:   // WM_ACTIVATEAPP：被切到別的程式（Alt+Tab、Win 鍵、Ctrl+Alt+Del…）；lParam 是切過去的那個程式的執行緒
+                    if (m.WParam == IntPtr.Zero && Leave != null) Leave((int)m.LParam.ToInt64());
                     break;
                 case 0x0010:   // WM_CLOSE（Alt+F4）：不直接關視窗，照樣滑走
-                    if (Leave != null) Leave();
+                    if (Leave != null) Leave(0);
                     return;
             }
             base.WndProc(ref m);
@@ -3279,7 +3327,9 @@ namespace VideoWallpaper
         bool volumeFound, draggingVolume;
         bool volumeExpanded;               // 音量滑桿展開中（平常只有喇叭）
         DispatcherTimer hoverTimer, collapseTimer;
+        DispatcherTimer dragWatch;         // 拖曳中每 0.1 秒看左鍵還有沒有按著（在別的螢幕上放開時，放開的訊息收不到）
         int volumeSetTick, wheel;          // 最近一次調音量的時間；滾輪還沒用掉的量
+        int spotifyCommandTick;            // 最近一次真的送音量 / 靜音指令給 Spotify 的時間（它會因此跳到前景）
 
         // 歌詞
         bool lyricsOn;                     // 按了歌詞按鈕才顯示（換歌也繼續顯示）；鎖定畫面收起來就關掉，下次要再按一次
@@ -3351,6 +3401,8 @@ namespace VideoWallpaper
             hoverTimer.Tick += delegate { hoverTimer.Stop(); if (Active && volumeFound && PointerOver(false)) ExpandVolume(true); };
             collapseTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1000) };
             collapseTimer.Tick += delegate { collapseTimer.Stop(); if (Active && !draggingVolume && !PointerOver(true)) ExpandVolume(false); };
+            dragWatch = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            dragWatch.Tick += delegate { if (!draggingVolume) dragWatch.Stop(); else if (!LockWindow.LeftButtonDown()) OnDrop(); };
 
             // 稍等影片第一格畫好，再從上面滑下來
             After(150, delegate
@@ -3384,11 +3436,12 @@ namespace VideoWallpaper
             int w, h, x, y;
 
             // 左下角的時鐘和天氣：時間或天氣變了才重畫
-            string clockKey = LockClock.ClockKey();
+            var now = DateTime.Now;
+            string clockKey = LockClock.ClockKey(now);
             if (force || clockKey != shownClock)
             {
                 shownClock = clockKey;
-                var clock = LockClock.RenderClock(primary.Bounds.Height, out w, out h, out x, out y);
+                var clock = LockClock.RenderClock(now, primary.Bounds.Height, out w, out h, out x, out y);
                 engine.SetOverlay(primary.Handle, "clock", clock, w, h, x, y);
             }
 
@@ -3399,7 +3452,8 @@ namespace VideoWallpaper
             // 歌詞按鈕的亮度：顯示中全白、有歌詞但沒開半亮、沒有歌詞很暗
             double micLevel = !Lyrics.Has(lyrics) ? 0.25 : lyricsOn ? 1.0 : 0.6;
 
-            // Spotify 的音量（背景每半秒讀一次）：拖曳中、剛調過的 1.5 秒內不看（Spotify 還沒反應過來，讀到的會是舊的）
+            // Spotify 的音量（卡片上是 Spotify 時背景每半秒讀一次）：拖曳中、剛調過的 1.5 秒內不看（Spotify 還沒反應過來，讀到的會是舊的）
+            SpotifyVolume.SetWanted(track != null && track.IsSpotify);
             double volume = Math.Max(0, shownVolume);
             if (track != null && !draggingVolume && Environment.TickCount - volumeSetTick > 1500)
             {
@@ -3420,6 +3474,12 @@ namespace VideoWallpaper
                 var found = new List<KeyValuePair<Rect, string>>();
                 card = LockClock.RenderMusic(primary.Bounds.Width, primary.Bounds.Height, volume, found);
                 var c = card ?? new LockClock.MusicCard();   // 沒在播：每張圖都是 null，拿掉
+                if (card == null)
+                {
+                    // 卡片拿掉了：音量滑桿回到收起來的狀態，下次卡片出現時才不會一出來就是展開的
+                    volumeExpanded = false;
+                    if (hoverTimer != null) { hoverTimer.Stop(); collapseTimer.Stop(); }
+                }
                 // 卡片底下是毛玻璃：卡片範圍＝圖扣掉四周留給陰影的空間
                 int shadow = LockClock.ShadowPad(primary.Bounds.Height);
                 engine.SetGlassOverlay(primary.Handle, "music", c.Chrome, c.Width, c.Height, c.X, c.Y,
@@ -3476,6 +3536,8 @@ namespace VideoWallpaper
                 // 音量在別的地方被調了（在 Spotify 裡調的）：只重畫音量那兩張
                 ShowVolume(volume);
             }
+            // 音量按鈕變暗了（卡片換成別的播放器、找不到 Spotify 的音量條）：展開的滑桿收起來
+            if (volumeExpanded && !volumeFound && !draggingVolume) ExpandVolume(false);
             UpdateLyrics();
         }
 
@@ -3552,7 +3614,7 @@ namespace VideoWallpaper
         {
             if (hoverTimer != null) hoverTimer.Stop();   // 按了就不要再展開
             double expected = shownVolume > 0 ? 0 : audibleVolume;
-            volumeSetTick = Environment.TickCount;
+            volumeSetTick = spotifyCommandTick = Environment.TickCount;
             SpotifyVolume.ToggleMute(expected);
             ShowVolume(expected);
         }
@@ -3564,6 +3626,7 @@ namespace VideoWallpaper
             volumeSetTick = Environment.TickCount;
             if (volume > 0) audibleVolume = volume;
             if (volume == shownVolume) return;
+            spotifyCommandTick = Environment.TickCount;
             SpotifyVolume.Set(volume);
             ShowVolume(volume);
         }
@@ -3597,6 +3660,7 @@ namespace VideoWallpaper
                             // 點到哪裡就調到哪裡，按著不放可以左右拖曳（每跨過一格 Spotify 就跟著變）
                             draggingVolume = true;
                             primary.StartDrag();
+                            if (dragWatch != null) dragWatch.Start();
                             SetVolume((x - card.TrackLeft) / card.TrackWidth);
                         }
                     }
@@ -3619,6 +3683,7 @@ namespace VideoWallpaper
             if (!draggingVolume) return;
             draggingVolume = false;
             volumeSetTick = Environment.TickCount;
+            if (dragWatch != null) dragWatch.Stop();
             if (primary != null) primary.EndDrag();
             if (collapseTimer != null && !PointerOver(true)) collapseTimer.Start();   // 在滑桿外面放開：1 秒後收起來
         }
@@ -3730,16 +3795,33 @@ namespace VideoWallpaper
         }
 
         // 切到別的程式（Alt+Tab、Win 鍵）、Alt+F4：一樣滑走
-        void OnLeave()
+        void OnLeave(int activatedThread)
         {
-            // 剛調過音量：是 Spotify 自己跳到前景（從外面設定它的音量時會這樣），不是使用者切走。
-            // 鎖定畫面本來就蓋在最上層，不收起來，稍等一下把前景拿回來（拿不回來也沒關係，空白鍵 / Enter / Esc 有另外登記）
-            if (Active && Environment.TickCount - volumeSetTick < 2000)
+            // 剛送了音量指令給 Spotify、切過去的又正好是 Spotify：是它自己跳到前景（從外面設定它的音量時會這樣），不是使用者切走。
+            // 鎖定畫面本來就蓋在最上層，不收起來，稍等一下把前景拿回來（拿不回來也沒關係，空白鍵 / Enter / Esc 有另外登記）。
+            // 使用者自己按 Win 鍵、Alt+Tab 切到別的程式時照樣滑走
+            if (Active && Environment.TickCount - spotifyCommandTick < 2000 && IsSpotifyThread(activatedThread))
             {
                 After(150, TakeForeground);
                 return;
             }
             OnDismiss();
+        }
+
+        // 這條執行緒是不是 Spotify 的
+        static bool IsSpotifyThread(int threadId)
+        {
+            if (threadId == 0) return false;
+            IntPtr thread = Native.OpenThread(0x0800 /* THREAD_QUERY_LIMITED_INFORMATION */, false, threadId);
+            if (thread == IntPtr.Zero) return false;
+            try
+            {
+                int pid = Native.GetProcessIdOfThread(thread);
+                using (var process = System.Diagnostics.Process.GetProcessById(pid))
+                    return string.Equals(process.ProcessName, "Spotify", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+            finally { Native.CloseHandle(thread); }
         }
 
         // 把前景拿回鎖定畫面。Windows 不讓背景程式直接搶前景，
@@ -3774,7 +3856,7 @@ namespace VideoWallpaper
             shownColorKey = null;
             shownVolume = shownVolumeLevel = -1;
             volumeFound = draggingVolume = volumeExpanded = false;
-            if (hoverTimer != null) { hoverTimer.Stop(); collapseTimer.Stop(); }
+            if (hoverTimer != null) { hoverTimer.Stop(); collapseTimer.Stop(); dragWatch.Stop(); }
             wheel = 0;
             NowPlaying.Stop();
             SpotifyVolume.Stop();
@@ -4405,6 +4487,7 @@ namespace VideoWallpaper
             if (!backdrop) window.Background = (Brush)root.Resources["WindowFallback"];
             ApplyWindowTheme();
             open = true;
+            WallpaperApp.IsStartupEnabled(true);   // 打開面板時重新查一次開機自動啟動（例如在工作排程器裡被改過）
             Refresh();
 
             // 放在工作列旁邊（右下角，跟 Windows 11 的快速設定一樣）
@@ -4938,9 +5021,13 @@ namespace VideoWallpaper
 
         // 開機自動啟動：用「工作排程器」在登入的當下直接啟動。
         // 以前用登錄檔的 Run 清單，但 Explorer 開機時會一個一個、等系統有空才啟動那份清單，常常要等好幾分鐘。
-        public static bool IsStartupEnabled()
+        // 查工作排程器要連線到系統服務（UI 執行緒上要等好幾毫秒），控制面板開著時每秒都會問，
+        // 所以記住結果：打開面板時（fresh）、切換開關之後才重新查
+        static bool? startupCache;
+        public static bool IsStartupEnabled(bool fresh = false)
         {
-            return StartupTaskExists() || RunEntryExists();
+            if (fresh || startupCache == null) startupCache = StartupTaskExists() || RunEntryExists();
+            return startupCache.Value;
         }
 
         static bool StartupTaskExists()
@@ -4976,6 +5063,7 @@ namespace VideoWallpaper
                 if (enable && !taskCreated) key.SetValue(RunName, "\"" + WinForms.Application.ExecutablePath + "\"");
                 else key.DeleteValue(RunName, false);
             }
+            startupCache = null;   // 下次問的時候重新查
         }
 
         // 已經開啟自動啟動時：舊的 Run 設定換成排程；exe 被搬走時更新路徑；
