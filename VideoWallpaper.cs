@@ -829,6 +829,10 @@ namespace VideoWallpaper
             // 就算某一格影片沒更新到，蓋上去的也是乾淨的影片，疊圖不會被貼兩次（那一格會突然變亮、閃一下）
             public IntPtr VideoTexture;
             public bool Visible = true;
+            // 已經畫上至少一格影片：剛建好的視窗是空的，就算被視窗蓋住（不用畫）也要先畫一格，
+            // 不然工作列後面、視窗縮小的瞬間看到的會是原本的桌布
+            public bool Presented;
+            public int FirstFrameTries;
             // 疊在影片上的圖（鎖定畫面的時鐘、正在播放、歌詞）：每一格影片畫好後貼上去。
             // 優先用 Direct2D（D2D）；這台電腦不支援才退回 GDI（Surface）
             public D2DTarget D2D;
@@ -886,6 +890,7 @@ namespace VideoWallpaper
         readonly ConcurrentQueue<Action> commands = new ConcurrentQueue<Action>();
         readonly AutoResetEvent wake = new AutoResetEvent(false);
         volatile bool redraw;
+        volatile bool frameReady;   // 影片已經解碼出第一格（在這之前複製出來的是黑畫面，不能當作「畫好了」）
 
         // 健康狀態，給 UI 執行緒的監控用
         volatile int lastHealthyTick = Environment.TickCount;   // 上次輸出畫面成功（或正常地被遮住）的時間
@@ -1243,6 +1248,7 @@ namespace VideoWallpaper
 
                     long pts;
                     bool newFrame = engine.OnVideoStreamTick(out pts) == 0;   // S_OK = 有新的一格
+                    if (newFrame) frameReady = true;
                     positionMs = (int)(engine.GetCurrentTime() * 1000);
                     if (newFrame || redraw) Render(newFrame);
                     if (stopping) break;
@@ -1315,6 +1321,7 @@ namespace VideoWallpaper
 
             engine.SetLoop(1);       // 播完直接從頭接著播
             engine.SetAutoPlay(0);
+            engine.SetPreload(4);    // MF_MEDIA_ENGINE_PRELOAD_AUTOMATIC：還沒播放也先解碼好第一格（桌面被蓋住、暫停中也有畫面可以先畫上去）
             engine.SetMuted(initialMuted ? 1 : 0);
             Check(engine.SetSource(path), "SetSource");
         }
@@ -1577,8 +1584,9 @@ namespace VideoWallpaper
             bool anyVisible = false;
             foreach (var t in targets)
             {
-                if (!t.Visible) continue;   // 被視窗蓋住的螢幕就不畫，省資源
-                anyVisible = true;
+                // 被視窗蓋住的螢幕就不畫，省資源（還沒畫過的除外：等第一格解碼好，先畫一格上去）
+                if (!t.Visible && (t.Presented || !frameReady)) continue;
+                if (t.Visible) anyVisible = true;
                 MFVideoNormalizedRect src;
                 D3DRect dst;
                 Fit(vw, vh, t.Width, t.Height, stretch, out src, out dst);
@@ -1587,6 +1595,8 @@ namespace VideoWallpaper
                 {
                     // 有新畫面卻一直複製失敗（約 2 秒）：多半是顯示卡資源失效，整個重建
                     if (newFrame && ++transferFailures > 120) { Lost(Lang.T("複製影片畫面一直失敗 0x", "Copying video frames keeps failing 0x") + hr.ToString("X8")); return; }
+                    // 第一格還沒畫上去（影片可能還沒解碼好）：暫停中也要再試，最多試約 3 秒
+                    if (!t.Presented && ++t.FirstFrameTries < 200) redraw = true;
                     continue;
                 }
                 transferFailures = 0;
@@ -1594,6 +1604,7 @@ namespace VideoWallpaper
                 if (DrawOverlay(t)) redraw = true;   // 歌詞捲動、淡入淡出中：下一次螢幕更新再畫一次
                 hr = t.SwapChain.Present(0, 0);
                 if (hr < 0) { Lost(Lang.T("輸出畫面失敗 0x", "Presenting the frame failed 0x") + hr.ToString("X8")); return; }
+                if (hr == 0) t.Presented = true;   // DXGI_STATUS_OCCLUDED（例如鎖定中）時其實沒畫上去，不算
                 lastHealthyTick = Environment.TickCount;
                 if (hr == 0 && newFrame) presentedFrames++;
             }
@@ -1630,9 +1641,12 @@ namespace VideoWallpaper
         {
             switch (meEvent)
             {
+                case 1009:  // FIRSTFRAMEREADY：第一格解碼好了，暫停中也要把它畫出來
+                    frameReady = true;
+                    RequestRedraw();
+                    break;
                 case 10:    // LOADEDMETADATA
                 case 17:    // SEEKED
-                case 1009:  // FIRSTFRAMEREADY：暫停中也要把第一格畫出來
                     RequestRedraw();
                     break;
                 case 5:     // ERROR
