@@ -46,8 +46,13 @@ namespace VideoWallpaper
             {
 #pragma warning disable 618   // 暫停別的執行緒拿堆疊是過時的做法，但這是唯一能看到卡在哪裡的辦法，只在卡住時用一次
                 uiThread.Suspend();
-                try { stack = new StackTrace(uiThread, true).ToString(); }
-                finally { uiThread.Resume(); }
+                // 保險：拿堆疊時如果剛好要等畫面執行緒手上的鎖，兩邊會互相等、永遠卡住；2 秒後一定讓畫面執行緒繼續
+                // （拿堆疊那邊就會失敗，記一行拿不到）。不讀原始碼檔案的位置，少碰一點東西
+                using (new Timer(delegate { try { uiThread.Resume(); } catch { } }, null, 2000, Timeout.Infinite))
+                {
+                    try { stack = new StackTrace(uiThread, false).ToString(); }
+                    finally { try { uiThread.Resume(); } catch { } }
+                }
 #pragma warning restore 618
             }
             catch (Exception ex) { stack = "（拿不到堆疊：" + ex.Message + "）"; }

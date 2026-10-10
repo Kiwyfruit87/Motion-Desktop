@@ -22,8 +22,9 @@ namespace VideoWallpaper
             }
             catch (WebException ex)
             {
-                var http = ex.Response as HttpWebResponse;
-                if (missingIsNull && http != null && ((int)http.StatusCode == 404 || (int)http.StatusCode == 400)) return null;
+                // 錯誤的回應也要關掉，不然連線一直佔著（同一個網站預設只開 2 條），之後的查詢會卡到逾時
+                using (var http = ex.Response as HttpWebResponse)
+                    if (missingIsNull && http != null && ((int)http.StatusCode == 404 || (int)http.StatusCode == 400)) return null;
                 throw;
             }
         }

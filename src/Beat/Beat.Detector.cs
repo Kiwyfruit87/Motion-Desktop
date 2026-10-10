@@ -35,7 +35,7 @@ namespace VideoWallpaper
         //    鼓點一進來就有，持續的低音很快就不算了；
         // 2. 跟這首歌最近最重的一下比（大約 20 秒減一半，換歌只減一半）：15% 以下不亮、六成以上全亮。
         //    記得夠久，沒有鼓的段落裡鋼琴、人聲比較低的聲音才不會被當成重拍；
-        // 3. 只亮敲出來的低音，下面兩種其中一種成立，接下來 40 毫秒的低音才算數：
+        // 3. 只亮敲出來的低音，下面兩種其中一種成立，接下來 60 毫秒的低音才算數：
         //    a. 有敲擊聲：7k 以上（貝斯、鋼琴的低音碰不到）比前 15 毫秒突然變大 6 dB 以上。鼓打下去的「喀」比低音早 5～20 毫秒，
         //       所以一般的鼓組反應最快；
         //    b. 比當下的低音突出：衝擊感到了平常低音（慢的包絡）的 1.1 倍，而且 7k 以上一直有聲音（鈸、小鼓這類鼓組；
@@ -58,7 +58,7 @@ namespace VideoWallpaper
         //    一有大鼓就回到只跟大鼓。鈸不跟：電子舞曲前奏、主歌的高頻每拍有 6～8 下（鈸、沙鈴、音效、齒音疊在一起），
         //    就算只挑最響的，也只有兩三成剛好落在拍子上，看起來是亂閃；鋼琴、吉他的琴槌、撥弦聲也會被當成鈸；
         // 6. 畫面上的亮度：往上幾毫秒內就跟上，往下慢慢退：平常照 ReleaseMs；打得很密（drop 前的連打）時，退的時間跟著
-        //    上一下到這一下的間隔變短（間隔的一半，最快 45 毫秒），一下一下才分得出來，不會糊成一直亮著。
+        //    最近 0.75 秒亮了幾下變短（平均間隔的一半，最快 45 毫秒），一下一下才分得出來，不會糊成一直亮著；連打停了就恢復。
         // 聽到多少就亮多少，所以不規律的音樂也跟得上；沒有低音的安靜段落不亮
         class Detector
         {
@@ -211,6 +211,8 @@ namespace VideoWallpaper
                     release = Math.Exp(-blockMs / ReleaseNow);
                     lastTrigger = blocks;
                 }
+                // 連打停了（0.75 秒沒有再亮起來）：恢復平常的退法，不然之後比較輕的鼓也會一閃就不見
+                if (ReleaseNow < ReleaseMs && (blocks - lastTrigger) * blockMs >= 750) { ReleaseNow = ReleaseMs; release = glowKeep; }
                 lastTarget = target;
                 bool falling = target <= glow;
                 glow = falling ? Math.Max(target, glow * release) : glow + glowUp * (target - glow);

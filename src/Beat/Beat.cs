@@ -56,6 +56,7 @@ namespace VideoWallpaper
         // 是不是正在往下退（1 位元）
         static long shown;
         static volatile bool running, resetWanted;
+        static readonly object gate = new object();   // 開始 / 結束聽的執行緒時鎖住，剛好同時發生也不會沒有人在聽
         static double strongest = 0.08, drumness = 0.8;   // 上次聽到的鼓有多重、像不像鼓（下次打開鎖定畫面接著用，不用從頭適應）
         static Thread worker;
 
@@ -64,10 +65,10 @@ namespace VideoWallpaper
 
         public static void Start()
         {
-            if (running) return;
-            running = true;
-            if (worker == null || !worker.IsAlive)
+            lock (gate)
             {
+                running = true;
+                if (worker != null) return;   // 還在跑（包括正要結束的）：它看到 running 又變回 true 就會繼續聽
                 worker = new Thread(Run) { IsBackground = true, Name = "Beat" };
                 worker.Start();
             }
@@ -106,10 +107,20 @@ namespace VideoWallpaper
 
         static void Run()
         {
-            while (running)
+            while (true)
             {
-                try { Capture(); } catch { }
-                for (int i = 0; i < 20 && running; i++) Thread.Sleep(50);   // 斷掉了（例如換了喇叭 / 耳機）：1 秒後重新開始
+                while (running)
+                {
+                    try { Capture(); } catch { }
+                    for (int i = 0; i < 20 && running; i++) Thread.Sleep(50);   // 斷掉了（例如換了喇叭 / 耳機）：1 秒後重新開始
+                }
+                // 要結束了：先確認這段時間沒有人又叫 Start（不然鎖定畫面剛關又馬上打開時，這次就沒有光暈）
+                lock (gate)
+                {
+                    if (running) continue;
+                    worker = null;
+                    return;
+                }
             }
         }
 
