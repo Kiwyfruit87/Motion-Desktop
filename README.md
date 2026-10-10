@@ -49,7 +49,7 @@ click **Run** (untick "Always ask before opening this file" so it won't ask agai
 
 | File | Purpose |
 | --- | --- |
-| `VideoWallpaper.cs` | Source code |
+| `src\` | Source code, one folder per part: `App` (tray panel, settings, startup), `Desktop` (windows behind the desktop icons), `Video` (playback engine), `LockScreen`, `Media` (now playing, lyrics, weather, Spotify volume), `Beat` (beat detection), `Interop` (Windows API declarations) |
 | `app.manifest` | Declares DPI awareness and supported Windows versions (needed on 24H2) |
 | `build.cmd` | Double-click to build `VideoWallpaper.exe` |
 | `VideoWallpaper.exe` | The program (appears after building) |
@@ -67,6 +67,8 @@ Turning the option off removes it. Only if creating the task fails does it fall 
 - Press Space (or Enter, Esc) or click the mouse: the screen slides up and you're back on the desktop.
 - Switching to another app (Alt+Tab, Win key) or pressing Alt+F4 also slides it away.
 - This is a full-screen view that *looks like* a lock screen. It does not ask for a password; use Win+L to actually lock your PC.
+- While it's open, the PC won't turn the display off or go to sleep because of inactivity (like when a video is playing). Win+L, closing the lid or the power button still work as usual.
+- The music card's border glows on the kick drum: the program listens to what the PC is playing in real time (in memory only; nothing is recorded, saved or sent) and lights up on each beat. No drums, no glow.
 - While music is playing (Spotify, YouTube Music in a browser, or any app that shows up in the Windows media controls),
   a frosted-glass music card appears in the bottom-right corner (the video behind it is blurred in real time):
   album art on the left, song title and artist on the right,
@@ -118,6 +120,7 @@ Turning the option off removes it. Only if creating the task fails does it fall 
 
 - Videos are decoded with Windows' built-in Media Foundation engine (GPU hardware acceleration) and drawn to the wallpaper with Direct3D 11.
 - Multiple monitors share one decoder; each monitor is scaled separately.
+- Videos up to 256 MB are loaded into memory once, so a hard drive that has spun down doesn't stall playback.
 - On the lock screen, the clock, now-playing card and lyrics are drawn onto the video on the GPU with Direct2D (falls back to GDI if Direct2D isn't available).
 - Monitors covered by windows aren't drawn. When all monitors are covered, playback is paused manually, the PC is locked / asleep, or the display is off, the whole engine pauses.
 - The program checks itself: if engine output fails, the graphics driver resets, or the picture isn't actually moving after unlocking, it rebuilds the playback engine.
@@ -185,7 +188,7 @@ H.264 `.mp4` is recommended. `.wmv` works too. HEVC (H.265) requires the HEVC ex
 
 | 檔案 | 用途 |
 | --- | --- |
-| `VideoWallpaper.cs` | 原始碼 |
+| `src\` | 原始碼，依功能分資料夾：`App`（控制面板、設定、開機啟動）、`Desktop`（桌面圖示後面的視窗）、`Video`（播放引擎）、`LockScreen`（鎖定畫面）、`Media`（正在播放、歌詞、天氣、Spotify 音量）、`Beat`（抓拍子）、`Interop`（Windows API 宣告） |
 | `app.manifest` | 宣告 DPI 與 Windows 版本支援（24H2 需要） |
 | `build.cmd` | 雙擊編譯，產生 `VideoWallpaper.exe` |
 | `VideoWallpaper.exe` | 主程式（編譯後才有） |
@@ -203,6 +206,8 @@ H.264 `.mp4` is recommended. `.wmv` works too. HEVC (H.265) requires the HEVC ex
 - 按空白鍵（或 Enter、Esc）、或按一下滑鼠：畫面往上滑走，回到桌面。
 - 切到別的程式（Alt+Tab、Win 鍵）或按 Alt+F4 也會滑走。
 - 這是「看起來像鎖定畫面」的全螢幕畫面，不會要求密碼；要真正鎖定電腦請用 Win+L。
+- 開著的時候，電腦不會因為閒置而關螢幕或睡眠（跟播放影片時一樣）；按 Win+L、闔上螢幕、按電源鍵照常有效。
+- 音樂卡片的邊框會跟著大鼓發光：程式即時聽電腦正在播出的聲音（只在記憶體裡算，不錄音、不存檔、不傳出去），每一下重拍亮一下；沒有鼓就不亮。
 - 有音樂在播放時（Spotify、瀏覽器裡的 YouTube Music，或其他會出現在 Windows 媒體控制裡的程式），
   右下角會出現一張毛玻璃的音樂卡片（卡片後面的影片會即時模糊）：左邊專輯封面，右邊歌名、歌手，
   下面是上一首 / 播放暫停 / 下一首按鈕（可以直接點，不會讓鎖定畫面滑走）。卡片離螢幕右邊和下面的距離一樣。
@@ -249,6 +254,7 @@ H.264 `.mp4` is recommended. `.wmv` works too. HEVC (H.265) requires the HEVC ex
 
 - 影片用 Windows 內建的 Media Foundation 播放引擎解碼（顯示卡硬體加速），再用 Direct3D 11 畫到桌布上。
 - 多個螢幕共用同一個解碼器，每個螢幕各自縮放。
+- 256 MB 以內的影片會先整支讀進記憶體，放在傳統硬碟上時，硬碟停轉也不會讓影片卡住。
 - 鎖定畫面的時鐘、正在播放和歌詞，用 Direct2D 直接在顯示卡上畫到影片上（這台電腦不支援時才退回 GDI）。
 - 被視窗蓋住的螢幕不會繪製；所有螢幕都被蓋住、手動暫停、電腦鎖定 / 睡眠、或螢幕關閉時，整個引擎會暫停。
 - 程式會自我檢查：引擎輸出失敗、顯示卡重設、或解鎖後畫面沒有真的在動時，會自動重建播放引擎。

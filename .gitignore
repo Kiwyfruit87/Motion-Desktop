@@ -7,3 +7,6 @@ settings.ini
 
 # 發佈到 GitHub Releases 用的 ZIP（不放進 repo）
 release/
+
+# 卡住監視器的記錄（每台電腦自己產生）
+hang.log
