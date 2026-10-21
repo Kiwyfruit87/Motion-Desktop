@@ -5,10 +5,10 @@ using System.Runtime.InteropServices;
 namespace VideoWallpaper
 {
     // 疊圖的順序（數字小的先畫）：
-    // 卡片的毛玻璃（左下角的時鐘也在這層）→ 卡片的顏色 → 帶顏色的邊框和光暈 → 封面、文字、按鈕 → 歌詞
+    // 卡片的毛玻璃（左下角的時鐘也在這層）→ 重拍時邊框的光暈 → 封面、文字、按鈕 → 歌詞
     static class OverlayLayer
     {
-        public const int Glass = 0, CardColor = 1, CardEdge = 2, CardContent = 3, Lyrics = 4;
+        public const int Glass = 0, CardEdge = 1, CardContent = 2, Lyrics = 3;
     }
 
     // 播放引擎的疊圖：鎖定畫面的時鐘、正在播放、歌詞，每一格影片畫好之後貼上去。
@@ -21,6 +21,7 @@ namespace VideoWallpaper
             public IntPtr DC, Bitmap, OldBitmap;  // GDI 的圖（退回 GDI 時）
             public int X, Y, W, H;
             public int Z;                         // 疊的順序（見 OverlayLayer）
+            public int Follow;                    // 鎖定畫面滑動時跟著卡片動：0 不動（時鐘）、1 跟著移動（卡片上方的歌詞）、2 跟著移動和變形（卡片本身）
             public Tween Fade = new Tween(1);     // 整張圖的不透明度（淡入淡出）
             public bool RemoveWhenFaded;          // 動畫做完就拿掉（淡出、滑出）
             // 捲動的疊圖（歌詞）：整張長圖只露出 ViewH 高的一段（從第 Scroll 列開始），Mask 是露出那段每一列的亮度（0～1）
@@ -30,23 +31,12 @@ namespace VideoWallpaper
             // Shade：長圖每一列的亮度（跟著長圖一起捲動，null = 都一樣亮）；換的時候從 ShadeFrom 慢慢變過去
             public float[] Shade, ShadeFrom;
             public Tween ShadeMix = new Tween(1);
-            // 慢慢飄動的漸層（音樂卡片的顏色）：這張圖比卡片大一圈，用它填滿卡片的圓角長方形 (DriftX, DriftY, DriftW, DriftH)，
-            // 圖的位置隨時間在 ±DriftAmpX / ±DriftAmpY 的範圍內慢慢移動
-            public bool Drift;
-            public int DriftX, DriftY, DriftW, DriftH;
-            public double DriftRadius, DriftAmpX, DriftAmpY;
-            public IntPtr DriftBrush;
             // 跟著重拍閃的光暈（卡片邊框的光）：平常看不到，亮度跟著 PulseLevel 亮起來再暗回去
             public bool Pulse;
             // 左右滑動（換歌時封面和文字的翻頁動畫），只在 Clip 範圍內看得到
             public Tween Move;
             public bool Clip;
             public int ClipX, ClipY, ClipW, ClipH;
-            // 展開 / 收起（音量條）：圖上 RevealX 開始、RevealW 寬的這段，展開到一半時從左邊長出來——
-            // 切成「左邊滑桿｜把手（RevealPivot 左右 RevealPivotW）｜右邊滑桿」三塊，兩邊照展開程度拉長、把手保持原樣。RevealW = 0 就是不用
-            public int RevealX, RevealW;
-            public double RevealPivot, RevealPivotW;
-            public Tween Reveal = new Tween(1);
             // 毛玻璃：圖底下這塊圓角長方形 (GlassX, GlassY, GlassW, GlassH) 的影片先糊掉再貼圖
             public bool Glass;
             public int GlassX, GlassY, GlassW, GlassH;
@@ -54,11 +44,10 @@ namespace VideoWallpaper
             public bool GlassReady;
             public int BlurX, BlurY, BlurW, BlurH;
 
-            public bool Running(long now) { return Scroll.Running(now) || ShadeMix.Running(now) || Fade.Running(now) || Move.Running(now) || Reveal.Running(now); }
+            public bool Running(long now) { return Scroll.Running(now) || ShadeMix.Running(now) || Fade.Running(now) || Move.Running(now); }
 
             public void Release()
             {
-                if (DriftBrush != IntPtr.Zero) { Marshal.Release(DriftBrush); DriftBrush = IntPtr.Zero; }
                 if (D2DBitmap != IntPtr.Zero) { Marshal.Release(D2DBitmap); D2DBitmap = IntPtr.Zero; }
                 if (DC != IntPtr.Zero)
                 {
@@ -89,22 +78,6 @@ namespace VideoWallpaper
             WithTarget(hwnd, delegate(Target t, long now)
             {
                 ReplaceFading(t, now, name, pixels, width, height, x, y, z, fadeMs, delegate(Overlay o) { o.Pulse = pulse; });
-            });
-        }
-
-        // 慢慢飄動的漸層（音樂卡片的顏色）：pixels 是比卡片大一圈的漸層圖，平常左上角放在 (x, y)；
-        // 用它填滿卡片的圓角長方形 (cardX, cardY, cardW, cardH)，位置在 ±ampX / ±ampY 的範圍內慢慢移動。換顏色時跟 SetFadeOverlay 一樣淡入淡出
-        public void SetDriftOverlay(IntPtr hwnd, string name, int[] pixels, int width, int height, int x, int y, int z,
-            int cardX, int cardY, int cardW, int cardH, double radius, double ampX, double ampY, int fadeMs)
-        {
-            WithTarget(hwnd, delegate(Target t, long now)
-            {
-                ReplaceFading(t, now, name, pixels, width, height, x, y, z, fadeMs, delegate(Overlay o)
-                {
-                    o.Drift = true;
-                    o.DriftX = cardX; o.DriftY = cardY; o.DriftW = cardW; o.DriftH = cardH;
-                    o.DriftRadius = radius; o.DriftAmpX = ampX; o.DriftAmpY = ampY;
-                });
             });
         }
 
@@ -144,16 +117,13 @@ namespace VideoWallpaper
             });
         }
 
-        // 可以左右滑動的疊圖（音樂卡片的封面和文字），只在 (clipX, clipY, clipW, clipH) 範圍內看得到。
-        // shift ≠ 0：換歌的翻頁動畫——舊的往左滑出 shift、新的從右邊 shift 處滑進來（shift 是負的就反過來），
-        //            兩張一起移動、間距不變，舊的完全離開卡片才拿掉。
-        // shift = 0：只是換圖（例如封面晚一點才讀到），如果正在滑動就接著滑，不會跳。
+        // 卡片上的疊圖（封面、文字、按鈕的圖示），只在 (clipX, clipY, clipW, clipH) 範圍內看得到。
+        // shift ≠ 0：換歌的動畫——舊的往左滑一小段（shift）同時淡出、新的從右邊 shift 處滑進來同時淡入（shift 是負的就反過來），
+        //            舊的淡完就拿掉。
+        // shift = 0：只是換圖（例如封面晚一點才讀到、按了播放暫停），如果正在滑動就接著滑，不會跳。
         // opacity：這張圖的亮度（0～1）。只是換圖（shift = 0）時，從原本的亮度花 fadeMs 慢慢變到新的亮度
-        // revealW > 0：可以展開 / 收起的音量條（範圍 revealX 開始 revealW 寬，把手在 pivot、左右各 pivotW；
-        // reveal 是展開程度，之後用 RevealOverlay 慢慢展開 / 收起）；換圖時接著原本的展開程度
         public void SetSlideOverlay(IntPtr hwnd, string name, int[] pixels, int width, int height, int x, int y, int z,
-            int clipX, int clipY, int clipW, int clipH, int shift, int ms, double opacity, int fadeMs,
-            int revealX = 0, int revealW = 0, double reveal = 1, double pivot = 0, double pivotW = 0)
+            int clipX, int clipY, int clipW, int clipH, int shift, int ms, double opacity, int fadeMs)
         {
             WithTarget(hwnd, delegate(Target t, long now)
             {
@@ -166,19 +136,18 @@ namespace VideoWallpaper
                 o.Z = z;
                 o.Clip = true; o.ClipX = clipX; o.ClipY = clipY; o.ClipW = clipW; o.ClipH = clipH;
                 o.Fade = new Tween(opacity);
-                o.RevealX = revealX; o.RevealW = revealW; o.RevealPivot = pivot; o.RevealPivotW = pivotW;
-                o.Reveal = revealW > 0 && old != null && old.RevealW > 0 ? old.Reveal : new Tween(reveal);
                 if (shift != 0)
                 {
                     if (old != null)
                     {
                         double from = old.Move.Value(now);
                         old.Move = new Tween(from, from - shift, now, ms);
-                        old.Fade.Freeze(now);         // 亮度停在現在的樣子
-                        old.RemoveWhenFaded = true;   // 滑完就拿掉
+                        old.Fade.Retarget(0, ms, now);   // 一邊滑一邊淡出
+                        old.RemoveWhenFaded = true;      // 淡完就拿掉
                         t.Put(name + "#" + now, old);
                     }
                     o.Move = new Tween(shift, 0, now, ms);
+                    o.Fade = new Tween(0, opacity, now, ms);   // 新的一邊滑進來一邊淡入
                 }
                 else if (old != null)
                 {
@@ -222,15 +191,6 @@ namespace VideoWallpaper
             {
                 o.Fade.Retarget(to, ms, now);
                 o.RemoveWhenFaded = remove;
-            });
-        }
-
-        // 展開 / 收起（to = 1 全部露出、0 收起來），從目前的樣子接著變，花 ms 毫秒
-        public void RevealOverlay(IntPtr hwnd, string name, double to, int ms)
-        {
-            WithOverlay(hwnd, name, delegate(Overlay o, long now)
-            {
-                if (o.RevealW > 0) o.Reveal = new Tween(RevealProgress(o.Reveal, now), to, now, ms);
             });
         }
 
@@ -310,37 +270,6 @@ namespace VideoWallpaper
             return o;
         }
 
-        // 飄動的位置：左右、上下用不同的週期（31 秒、23 秒），軌跡不會一直重複同一條線，移動也很慢
-        static void DriftOffset(Overlay o, long now, out double dx, out double dy)
-        {
-            double seconds = now / 1000.0;
-            dx = o.DriftAmpX * Math.Sin(2 * Math.PI * seconds / 31);
-            dy = o.DriftAmpY * Math.Sin(2 * Math.PI * seconds / 23 + 1.3);
-        }
-
-        // 展開的程度：展開用減速曲線（一開始就動、最後慢慢停下），收起用加速曲線（慢慢起步、滑回去）
-        static double RevealProgress(Tween r, long now)
-        {
-            if (r.Ms <= 0 || now - r.Start >= r.Ms) return r.To;
-            double t = (now - r.Start) / (double)r.Ms;
-            double eased = r.To >= r.From ? 1 - Math.Pow(1 - t, 3) : t * t;
-            return r.From + (r.To - r.From) * eased;
-        }
-
-        // 展開到一半的音量條：切成「左邊滑桿｜把手｜右邊滑桿」三塊，兩邊照展開程度拉長、把手保持原樣（不會被壓扁），
-        // 整條從喇叭旁邊長出來、同時淡入；完全展開時三塊剛好接回原本的圖。x：這張圖現在在畫面上的左邊
-        static void GrowingParts(Overlay o, double x, double reveal, out double[] source, out double[] dest)
-        {
-            double a = o.RevealX, d = o.RevealX + o.RevealW;
-            double b = Math.Max(a, Math.Min(d, o.RevealPivot - o.RevealPivotW));
-            double c = Math.Max(b, Math.Min(d, o.RevealPivot + o.RevealPivotW));
-            double left = (b - a) * reveal, right = (d - c) * reveal;
-            source = new[] { a, b - a, b, c - b, c, d - c };                                      // 每塊在圖上的左邊和寬度
-            dest = new[] { x + a, left, x + a + left, c - b, x + a + left + (c - b), right };    // 每塊在畫面上的左邊和寬度
-        }
-
-        static double GrowingOpacity(double reveal) { return Math.Min(1, reveal * 1.6); }   // 長到六成多就完全不透明
-
         // 把疊圖用 alpha 混合貼到剛畫好的影片畫面上（Direct2D 或 GDI，見 OverlayCanvas）。
         // 回傳 true 代表還有疊圖在動畫中（捲動、淡入淡出、光暈），下一次螢幕更新要再畫一次
         bool DrawOverlay(Target t)
@@ -366,31 +295,28 @@ namespace VideoWallpaper
             var canvas = t.Canvas;
             if (!canvas.Begin(t)) return false;
             bool animating = false;
+            // 液態玻璃卡片：卡片內容（封面、文字、圖示）貼上去之前，引擎先畫進度條、圓鈕的底；
+            // 卡片內容都貼完之後（下一張是歌詞、或全部畫完），再疊上第二層的小玻璃（歌詞圓鈕）
+            bool card = t.Liquid != null && t.Liquid.Spec != null, controlsPending = card, topPending = card;
+            int follow = -1;   // canvas 現在的變形（-1：還沒設定）
             foreach (var o in t.Ordered)
             {
+                if (controlsPending && o.Z >= OverlayLayer.CardContent) { DrawControls(t, canvas, ref follow); controlsPending = false; }
+                if (topPending && o.Z > OverlayLayer.CardContent) { DrawTop(t, canvas, ref follow); topPending = false; }
                 if (o.Running(now)) animating = true;   // 光暈要不要重畫由引擎看亮度變了多少決定（見 PulseLevel）
                 if (!canvas.HasImage(o)) continue;
+                if (o.Glass && t.LiquidActive) continue;   // 液態玻璃取代原本的毛玻璃（底和邊框都不畫）
                 double fade = o.Fade.Value(now);
                 if (fade <= 0.004) continue;
-                if (o.Drift)
-                {
-                    // 慢慢飄動的漸層：只在卡片的圓角範圍內，圖的位置隨時間移動
-                    double dx, dy;
-                    DriftOffset(o, now, out dx, out dy);
-                    canvas.Drift(o, dx, dy, Math.Min(1, fade));
-                    continue;
-                }
+                Follow(t, canvas, o.Follow, ref follow);
                 if (o.Pulse) fade *= glow;   // 邊框的光暈：只在重拍時亮
                 if (fade <= 0.004) continue;
                 if (o.ViewH == 0)
                 {
-                    double reveal = o.RevealW > 0 ? RevealProgress(o.Reveal, now) : 1;
-                    if (reveal <= 0.001) continue;
                     canvas.Glass(o, Math.Min(1, fade));
                     double offset = canvas.Snap(o.Move.Value(now));
                     int clip = o.Clip ? canvas.PushClip(o) : 0;
-                    if (reveal < 0.999) canvas.Growing(o, offset, reveal, Math.Min(1, fade));
-                    else canvas.Image(o, offset, Math.Min(1, fade));
+                    canvas.Image(o, offset, Math.Min(1, fade));
                     if (o.Clip) canvas.PopClip(clip);
                     continue;
                 }
@@ -413,8 +339,40 @@ namespace VideoWallpaper
                     canvas.Strip(o, row, h, source, Math.Min(1, alpha));
                 }
             }
+            if (controlsPending) DrawControls(t, canvas, ref follow);
+            if (topPending) DrawTop(t, canvas, ref follow);
+            Follow(t, canvas, 0, ref follow);   // 還原（下一格從不變形開始）
             canvas.End();
             return animating;
+        }
+
+        // 讓 canvas 照這張圖跟著卡片的方式變形（跟現在一樣就不重設）
+        void Follow(Target t, OverlayCanvas canvas, int how, ref int current)
+        {
+            if (how == current) return;
+            current = how;
+            double sx = 1, sy = 1, dx = 0, dy = 0;
+            if (how == 2) CardTransform(t, out sx, out sy, out dx, out dy);
+            else if (how == 1 && t.Motion != null) dy = t.Motion.D;
+            canvas.SetTransform(sx, sy, dx, dy);
+        }
+
+        // 進度條、圓鈕的底（跟著卡片變形）
+        void DrawControls(Target t, OverlayCanvas canvas, ref int follow)
+        {
+            Follow(t, canvas, 2, ref follow);
+            DrawLiquidControls(t, canvas);
+        }
+
+        // 卡片的圖都貼完了：先停下 Direct2D，用 Direct3D 疊上第二層的小玻璃，再接著畫
+        void DrawTop(Target t, OverlayCanvas canvas, ref int follow)
+        {
+            if (!t.LiquidActive) return;
+            Follow(t, canvas, 0, ref follow);
+            canvas.End();
+            DrawLiquidTop(t);
+            canvas.Resume();
+            follow = -1;
         }
     }
 }

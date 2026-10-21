@@ -17,17 +17,21 @@ namespace VideoWallpaper
         static readonly FontFamily ClockFont = new FontFamily(
             new Uri(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fonts") + "\\"), "./#Google Sans Flex, Segoe UI, Microsoft JhengHei UI, Malgun Gothic");
         static readonly FontFamily IconFont = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets");
+        // 音樂卡片用 Inter（fonts 資料夾裡，開源授權；最接近 Apple 的 SF Pro）；中文用微軟正黑體，其他照時鐘的順序
+        static readonly FontFamily CardFont = new FontFamily(
+            new Uri(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fonts") + "\\"), "./#Inter, Microsoft JhengHei UI, Segoe UI, Malgun Gothic");
 
         // 圖的四周留給陰影的空間
         public static int ShadowPad(int screenHeight) { return (int)Math.Ceiling(30 * screenHeight / 1080.0); }
 
-        // 卡片內距；歌詞跟卡片裡的內容左右對齊，所以寬度＝卡片寬度扣掉兩邊內距
-        public static double CardPadding(double s) { return Math.Round(12 * s); }
-        public static double CardRadius(double s) { return Math.Round(14 * s); }
+        // 卡片內距；歌詞跟卡片裡的內容左右對齊，所以寬度＝卡片寬度扣掉兩邊內距。
+        // 圓角 26 = 封面的圓角 10 + 內距 16（同心）
+        public static double CardPadding(double s) { return Math.Round(16 * s); }
+        public static double CardRadius(double s) { return Math.Round(26 * s); }
 
-        // 卡片邊框線的寬度（見 BuildCard 的玻璃邊緣）
+        // 卡片邊框線的寬度（見 DrawChrome 的玻璃邊緣）
         const double EdgeWidth = 1.5;
-        public static double LyricsWidth(double s) { return Math.Round(284 * s); }
+        public static double LyricsWidth(double s) { return Math.Round(368 * s); }   // 跟卡片裡面一樣寬（卡片 400 − 兩邊 16）
 
         // 把內容加上陰影畫成一張半透明圖（周圍留 pad 的空間給陰影）
         static int[] ToPixels(FrameworkElement content, double s, double pad, out Border root, out int width, out int height)

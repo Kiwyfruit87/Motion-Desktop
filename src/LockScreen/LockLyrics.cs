@@ -55,7 +55,7 @@ namespace VideoWallpaper
         }
 
         // 歌詞要不要顯示：要的話放上這首歌的長圖（淡入）、開計時器跟著播放進度捲動；
-        // 關掉、換歌、Spotify 沒在播時，舊的長圖淡出
+        // 關掉、換歌、播放器沒在播時，舊的長圖淡出
         public void Update()
         {
             var track = NowPlaying.Current;

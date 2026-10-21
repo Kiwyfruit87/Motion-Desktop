@@ -39,7 +39,6 @@ namespace VideoWallpaper
         [DllImport("kernel32.dll")] public static extern IntPtr OpenThread(uint access, bool inherit, int threadId);
         [DllImport("kernel32.dll")] public static extern int GetProcessIdOfThread(IntPtr thread);
         [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextLength(IntPtr hWnd);
         [DllImport("user32.dll")] public static extern bool SetLayeredWindowAttributes(IntPtr hWnd, uint colorKey, byte alpha, uint flags);
         [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
         [DllImport("user32.dll")] public static extern int MapWindowPoints(IntPtr from, IntPtr to, [In, Out] POINT[] points, int count);
@@ -85,6 +84,13 @@ namespace VideoWallpaper
         [DllImport("gdi32.dll")] public static extern bool RestoreDC(IntPtr hdc, int saved);
         [DllImport("gdi32.dll")] public static extern int IntersectClipRect(IntPtr hdc, int left, int top, int right, int bottom);
         [DllImport("gdi32.dll")] public static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int widthEllipse, int heightEllipse);
+        [DllImport("user32.dll")] public static extern int SetWindowRgn(IntPtr hWnd, IntPtr region, bool redraw);
+
+        // 控制面板的液態玻璃：抓面板後面的畫面（面板自己設成不會被抓到）
+        [DllImport("gdi32.dll")] public static extern bool GdiFlush();
+        [DllImport("gdi32.dll")] public static extern bool StretchBlt(IntPtr dest, int x, int y, int w, int h, IntPtr src, int sx, int sy, int sw, int sh, uint rop);
+        [DllImport("gdi32.dll")] public static extern int SetStretchBltMode(IntPtr hdc, int mode);
+        [DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint affinity);
         [DllImport("gdi32.dll")] public static extern int ExtSelectClipRgn(IntPtr hdc, IntPtr region, int mode);
 
         // 工作列透明用
@@ -133,9 +139,14 @@ namespace VideoWallpaper
         [DllImport("user32.dll")] static extern int SetWindowCompositionAttribute(IntPtr hWnd, ref WindowCompositionAttributeData data);
 
         // Acrylic 模糊背景，tint 是 AABBGGRR 格式的疊色（alpha 越小越透）
-        public static bool SetAcrylic(IntPtr hWnd, uint tint)
+        public static bool SetAcrylic(IntPtr hWnd, uint tint) { return SetAccent(hWnd, 4 /* ACCENT_ENABLE_ACRYLICBLURBEHIND */, tint); }
+
+        // 拿掉 Acrylic（控制面板改用自己畫的液態玻璃時）
+        public static bool ClearAccent(IntPtr hWnd) { return SetAccent(hWnd, 0 /* ACCENT_DISABLED */, 0); }
+
+        static bool SetAccent(IntPtr hWnd, int state, uint tint)
         {
-            var accent = new AccentPolicy { AccentState = 4 /* ACCENT_ENABLE_ACRYLICBLURBEHIND */, AccentFlags = 2, GradientColor = tint };
+            var accent = new AccentPolicy { AccentState = state, AccentFlags = 2, GradientColor = tint };
             int size = Marshal.SizeOf(accent);
             IntPtr ptr = Marshal.AllocHGlobal(size);
             try

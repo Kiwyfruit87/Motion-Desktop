@@ -10,15 +10,13 @@ namespace VideoWallpaper
         public Action Dismiss, Exposed;
         public Action<int> Leave;            // 被切到別的程式（參數：切過去的那個程式的執行緒；Alt+F4 時是 0）
         public Func<int, int, bool> Click;   // 回傳 true = 點到「正在播放」的按鈕，不要滑走
-        public Action<int, int> Hover;       // 滑鼠移動（停在喇叭上展開音量條用）
-        public Action<int, int> Drag;        // 按著左鍵拖曳音量滑桿（StartDrag 之後才會收到）
+        public Action<int, int> Drag;        // 按著左鍵拖曳進度條（StartDrag 之後才會收到）
         public Action Drop;                  // 放開左鍵
-        public Func<int, int, int, bool> Wheel;   // 滑鼠滾輪（位置、轉了多少）；回傳 true = 用掉了
         public System.Drawing.Rectangle Bounds { get; private set; }
         bool dragging;
 
         // 開始拖曳：滑鼠移到別的螢幕也繼續收到移動，直到放開左鍵。
-        // 拖曳中前景被搶走（Spotify 設定音量時會跳到前景）可能會失去這個「抓住」，
+        // 拖曳中前景被搶走（例如播放器自己跳到前景）可能會失去這個「抓住」，
         // 不過鎖定畫面蓋滿整個螢幕，移動一樣會送到這裡，所以拖曳照常繼續
         public void StartDrag()
         {
@@ -97,7 +95,6 @@ namespace VideoWallpaper
                     }
                     long mp = m.LParam.ToInt64();
                     int mx = (short)(mp & 0xFFFF), my = (short)((mp >> 16) & 0xFFFF);
-                    if (Hover != null) Hover(mx, my);
                     if (dragging && Drag != null) Drag(mx, my);
                     break;
                 case 0x0202:   // WM_LBUTTONUP：拖曳結束
@@ -107,16 +104,11 @@ namespace VideoWallpaper
                         if (Drop != null) Drop();
                     }
                     return;
-                case 0x020A:   // WM_MOUSEWHEEL：位置是螢幕座標，換成視窗裡的（鎖定畫面蓋滿整個螢幕）
-                    long wp = m.LParam.ToInt64();
-                    int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
-                    if (Wheel != null && Wheel((short)(wp & 0xFFFF) - Bounds.X, (short)((wp >> 16) & 0xFFFF) - Bounds.Y, delta)) return;
-                    break;
                 case 0x0100:   // WM_KEYDOWN：空白鍵 / Enter / Esc
                     int key = m.WParam.ToInt32();
                     if ((key == 0x20 || key == 0x0D || key == 0x1B) && Dismiss != null) Dismiss();
                     return;
-                case 0x0201:   // 滑鼠左鍵：點到播放按鈕就控制 Spotify，其他地方就滑走
+                case 0x0201:   // 滑鼠左鍵：點到卡片上的按鈕就控制播放器，其他地方就滑走
                     long lp = m.LParam.ToInt64();
                     if (Click != null && Click((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF))) return;
                     if (Dismiss != null) Dismiss();

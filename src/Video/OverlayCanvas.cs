@@ -12,13 +12,17 @@ namespace VideoWallpaper
             public abstract void End();
             public abstract bool HasImage(Overlay o);
             public virtual double Snap(double position) { return position; }   // 位置可以有小數嗎（GDI 只能畫在整數位置）
-            public abstract void Drift(Overlay o, double dx, double dy, double opacity);   // 飄動的漸層，填滿卡片的圓角範圍
             public virtual void Glass(Overlay o, double opacity) { }                      // 圖底下先把影片糊掉（只有 Direct2D 做得到）
             public abstract int PushClip(Overlay o);
             public abstract void PopClip(int saved);
             public abstract void Image(Overlay o, double offset, double opacity);                   // 整張圖，往右挪 offset
-            public abstract void Growing(Overlay o, double offset, double reveal, double opacity);  // 展開到一半的音量條
             public abstract void Strip(Overlay o, int row, int height, double source, double alpha); // 捲動的歌詞：長圖第 source 列開始的一條
+            // 液態玻璃卡片用（只有 Direct2D 做得到；GDI 不做）：
+            public virtual void SetTransform(double sx, double sy, double dx, double dy) { }   // 接下來畫的整個變形（卡片的慣性）
+            public virtual void FillSolid(double x, double y, double w, double h, double radius, double r, double g, double b, double a) { }
+            // 只露出 (x, y, w, h) 這段的圓角長方形 (shapeX, y, shapeW, h)：進度條已播放的部分，左端圓、右端切平
+            public virtual void FillSolid(double x, double y, double w, double h, double radius, double r, double g, double b, double a, double shapeX, double shapeW) { }
+            public virtual void Resume() { }   // End 之後接著畫（中間插了 Direct3D 的第二層玻璃）
         }
 
         // Direct2D：直接在顯示卡上畫，不用把畫面借給 GDI；位置可以有小數（線性內插），捲動、滑動更滑
@@ -37,7 +41,7 @@ namespace VideoWallpaper
                 bool reblur = t.FreshVideo && now - blurredAt >= 33;
                 foreach (var o in t.All)
                 {
-                    if (!o.Glass || o.D2DBitmap == IntPtr.Zero) { o.GlassReady = false; continue; }
+                    if (!o.Glass || o.D2DBitmap == IntPtr.Zero || t.LiquidActive) { o.GlassReady = false; continue; }   // 液態玻璃取代毛玻璃
                     int margin = o.GlassH / 3;
                     o.BlurX = Math.Max(0, o.GlassX - margin); o.BlurY = Math.Max(0, o.GlassY - margin);
                     o.BlurW = Math.Min(t.Width, o.GlassX + o.GlassW + margin) - o.BlurX;
@@ -53,14 +57,6 @@ namespace VideoWallpaper
 
             public override bool HasImage(Overlay o) { return o.D2DBitmap != IntPtr.Zero; }
 
-            // 用這張圖當筆刷填滿卡片的圓角長方形，圖的位置隨時間移動（圓角由填滿的形狀決定，不會跑掉）
-            public override void Drift(Overlay o, double dx, double dy, double opacity)
-            {
-                if (o.DriftBrush == IntPtr.Zero) o.DriftBrush = d2d.CreateBrush(o.D2DBitmap);
-                if (o.DriftBrush != IntPtr.Zero)
-                    d2d.FillRounded(o.DriftBrush, o.X + dx, o.Y + dy, o.DriftX, o.DriftY, o.DriftW, o.DriftH, o.DriftRadius, opacity);
-            }
-
             public override void Glass(Overlay o, double opacity)
             {
                 if (o.GlassReady) d2d.FillBlur(o.GlassX, o.GlassY, o.GlassW, o.GlassH, o.GlassRadius, o.BlurX, o.BlurY, o.BlurW, o.BlurH, opacity);
@@ -75,23 +71,26 @@ namespace VideoWallpaper
                 d2d.Draw(o.D2DBitmap, o.X + offset, o.Y, o.W, o.H, 0, opacity);
             }
 
-            // 三塊各自拉伸貼上；關掉邊緣反鋸齒，接縫才不會兩邊都只畫一半、變成一條淡淡的縫
-            public override void Growing(Overlay o, double offset, double reveal, double opacity)
-            {
-                double[] source, dest;
-                GrowingParts(o, o.X + offset, reveal, out source, out dest);
-                double alpha = opacity * GrowingOpacity(reveal);
-                d2d.SetAliased(true);
-                for (int i = 0; i < 6; i += 2)
-                    if (dest[i + 1] > 0.01 && source[i + 1] > 0)
-                        d2d.DrawPart(o.D2DBitmap, source[i], 0, source[i + 1], o.H, dest[i], o.Y, dest[i + 1], o.H, alpha);
-                d2d.SetAliased(false);
-            }
-
             public override void Strip(Overlay o, int row, int height, double source, double alpha)
             {
                 d2d.Draw(o.D2DBitmap, o.X, o.Y + row, o.W, height, source, alpha);
             }
+
+            public override void SetTransform(double sx, double sy, double dx, double dy) { d2d.SetTransform(sx, sy, dx, dy); }
+
+            public override void FillSolid(double x, double y, double w, double h, double radius, double r, double g, double b, double a)
+            {
+                d2d.FillSolid(x, y, w, h, radius, r, g, b, a);
+            }
+
+            public override void FillSolid(double x, double y, double w, double h, double radius, double r, double g, double b, double a, double shapeX, double shapeW)
+            {
+                d2d.PushClip(x, y, w, h);
+                d2d.FillSolid(shapeX, y, shapeW, h, radius, r, g, b, a);
+                d2d.PopClip();
+            }
+
+            public override void Resume() { d2d.Begin(); }
         }
 
         // 退回 GDI：這台電腦不支援 Direct2D 時才用。只能畫在整數位置、不能做毛玻璃
@@ -114,17 +113,6 @@ namespace VideoWallpaper
                 return new Native.BLENDFUNCTION { SourceConstantAlpha = (byte)Math.Round(255 * opacity), AlphaFormat = 1 };
             }
 
-            // 只在卡片的圓角範圍內貼上，圖的位置隨時間移動
-            public override void Drift(Overlay o, double dx, double dy, double opacity)
-            {
-                int keep = Native.SaveDC(dc), corner = (int)Math.Round(o.DriftRadius * 2);
-                IntPtr round = Native.CreateRoundRectRgn(o.DriftX, o.DriftY, o.DriftX + o.DriftW + 1, o.DriftY + o.DriftH + 1, corner, corner);
-                Native.ExtSelectClipRgn(dc, round, 1 /* RGN_AND */);
-                Native.DeleteObject(round);
-                Native.AlphaBlend(dc, o.X + (int)Math.Round(dx), o.Y + (int)Math.Round(dy), o.W, o.H, o.DC, 0, 0, o.W, o.H, Blend(opacity));
-                Native.RestoreDC(dc, keep);
-            }
-
             public override int PushClip(Overlay o)
             {
                 int saved = Native.SaveDC(dc);
@@ -137,20 +125,6 @@ namespace VideoWallpaper
             public override void Image(Overlay o, double offset, double opacity)
             {
                 Native.AlphaBlend(dc, o.X + (int)offset, o.Y, o.W, o.H, o.DC, 0, 0, o.W, o.H, Blend(opacity));
-            }
-
-            // 三塊各自拉伸貼上（位置取整數，接縫才不會重疊或空一條）
-            public override void Growing(Overlay o, double offset, double reveal, double opacity)
-            {
-                double[] source, dest;
-                GrowingParts(o, o.X + (int)offset, reveal, out source, out dest);
-                var growing = new Native.BLENDFUNCTION { SourceConstantAlpha = (byte)Math.Round(255 * opacity * GrowingOpacity(reveal)), AlphaFormat = 1 };
-                for (int i = 0; i < 6; i += 2)
-                {
-                    int sx = (int)Math.Round(source[i]), sw = (int)Math.Round(source[i] + source[i + 1]) - sx;
-                    int dx = (int)Math.Round(dest[i]), dw = (int)Math.Round(dest[i] + dest[i + 1]) - dx;
-                    if (sw > 0 && dw > 0) Native.AlphaBlend(dc, dx, o.Y, dw, o.H, o.DC, sx, 0, sw, o.H, growing);
-                }
             }
 
             public override void Strip(Overlay o, int row, int height, double source, double alpha)

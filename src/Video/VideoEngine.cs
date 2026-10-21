@@ -37,6 +37,7 @@ namespace VideoWallpaper
             // 有疊圖的輸出畫面（鎖定畫面）：影片先畫在這張乾淨的畫布，每一格整張蓋到輸出畫面上再貼疊圖。
             // 就算某一格影片沒更新到，蓋上去的也是乾淨的影片，疊圖不會被貼兩次（那一格會突然變亮、閃一下）
             public IntPtr VideoTexture;
+            public IntPtr ImageRtv;   // 圖片桌布：畫進 VideoTexture（沒有的話是輸出畫面）用的繪圖目標
             // VideoTexture 裡已經是最新的一格（影片沒換格時直接拿來用，不用再叫解碼器輸出一次）；
             // FreshVideo：這次重畫的影片是剛換的新一格（毛玻璃要重新模糊）
             public bool VideoCurrent, FreshVideo;
@@ -51,13 +52,26 @@ namespace VideoWallpaper
             public IDXGISurface1 Surface;
             public OverlayCanvas Canvas;
             public bool CanOverlay { get { return D2D != null || Surface != null; } }
+            // 鎖定畫面音樂卡片的液態玻璃（見 VideoEngine.Liquid.cs）：卡片和卡片上的東西、跟著頁面滑動的慣性、
+            // 畫在輸出畫面上用的繪圖目標和影片畫布的讀取介面、上次模糊的範圍和時間
+            public LiquidCard Liquid;
+            public CardMotion Motion;
+            public bool LiquidActive;
+            public IntPtr LiquidRtv, LiquidScene;
+            public int LiquidBlurX, LiquidBlurY, LiquidBlurW, LiquidBlurH;
+            public long LiquidBlurredAt = -100000;
 
             // 疊圖：名字 → 圖。照疊的順序排好的清單只在增減時重排（每一格都要照順序畫，不要每次都排序）
             readonly Dictionary<string, Overlay> overlays = new Dictionary<string, Overlay>();
             List<Overlay> ordered;
             public int OverlayCount { get { return overlays.Count; } }
             public bool TryGet(string name, out Overlay o) { return overlays.TryGetValue(name, out o); }
-            public void Put(string name, Overlay o) { overlays[name] = o; ordered = null; }
+            public void Put(string name, Overlay o)
+            {
+                o.Follow = name.StartsWith("music", StringComparison.Ordinal) ? 2 : name.StartsWith("lyrics", StringComparison.Ordinal) ? 1 : 0;
+                overlays[name] = o;
+                ordered = null;
+            }
             public void Remove(string name) { overlays.Remove(name); ordered = null; }
             public IEnumerable<KeyValuePair<string, Overlay>> Named { get { return overlays; } }
             public IEnumerable<Overlay> All { get { return overlays.Values; } }
@@ -109,8 +123,13 @@ namespace VideoWallpaper
         IDXGIFactory2 factory;
         IntPtr d2dFactory;   // Direct2D（畫疊圖用），建立失敗就是 0，改用 GDI
         IDXGIOutput output;
-        IMFMediaEngine engine;
+        IMFMediaEngine engine;   // 圖片桌布時是 null（不用媒體引擎）
         EngineNotify notify;
+        // 圖片桌布：引擎執行緒開始時解碼、放上顯示卡（不用媒體引擎）
+        readonly bool isImage;
+        ImageLayer image;
+        int imageFrameTick;   // 鎖定畫面開著時，上次為了光暈、進度條重畫的時間
+        int imageInterval;    // 鎖定畫面開著時，進度條多久要重畫一次（毫秒；0 是不用定時重畫）
         Stretch stretch;
         bool playing, stopping, mfStarted;
 
@@ -125,6 +144,7 @@ namespace VideoWallpaper
             this.stretch = stretch;
             this.onError = onError;
             this.onLost = onLost;
+            isImage = ImageLayer.IsImage(path);
             ui = Dispatcher.CurrentDispatcher;
             thread = new Thread(Run) { IsBackground = true, Name = "VideoEngine" };
             thread.SetApartmentState(ApartmentState.MTA);
@@ -149,6 +169,7 @@ namespace VideoWallpaper
                 if (t == null) return;
                 ReleaseTarget(t);
                 targets.Remove(t);
+                ReleaseLiquidScratch();   // 鎖定畫面的視窗拿掉了：沒有卡片的話，模糊圖也還回去
             });
         }
 
@@ -160,11 +181,12 @@ namespace VideoWallpaper
             Post(delegate
             {
                 playing = play;
+                if (engine == null) return;   // 圖片：沒有東西要播
                 if (play) engine.Play(); else engine.Pause();
             });
         }
 
-        public void SetMuted(bool muted) { Post(delegate { engine.SetMuted(muted ? 1 : 0); }); }
+        public void SetMuted(bool muted) { Post(delegate { if (engine != null) engine.SetMuted(muted ? 1 : 0); }); }
 
         public void SetStretch(Stretch value) { Post(delegate { stretch = value; redraw = redrawAll = true; foreach (var t in targets) t.VideoCurrent = false; }); }
 
@@ -212,30 +234,52 @@ namespace VideoWallpaper
                     }
                     if (stopping) break;
 
-                    long pts;
-                    bool newFrame = engine.OnVideoStreamTick(out pts) == 0;   // S_OK = 有新的一格
-                    if (newFrame) frameReady = true;
-                    positionMs = (int)(engine.GetCurrentTime() * 1000);
+                    bool newFrame = false;
+                    if (engine != null)
+                    {
+                        long pts;
+                        newFrame = engine.OnVideoStreamTick(out pts) == 0;   // S_OK = 有新的一格
+                        if (newFrame) frameReady = true;
+                        positionMs = (int)(engine.GetCurrentTime() * 1000);
+                    }
+                    else
+                    {
+                        lastHealthyTick = Environment.TickCount;   // 圖片：沒有新的一格，畫面沒變本來就不用重畫，算正常
+                        // 鎖定畫面開著、卡片的進度條在走：照進度條走一像素要多久重畫一次（每秒最多 30 次）；其他時候不畫
+                        imageInterval = ImageRedrawInterval();
+                        int since = Environment.TickCount - imageFrameTick;
+                        if (imageInterval > 0 && (since >= imageInterval || since < 0))
+                        {
+                            imageFrameTick = Environment.TickCount;
+                            redraw = true;
+                        }
+                    }
                     // 邊框光暈的亮度變了：這次螢幕更新就畫，不等影片的下一格（只有在有疊圖的畫面才看，光暈就畫在那上面）
                     var pulse = PulseLevel;
                     bool glowChanged = pulse != null && targets.Exists(t => t.OverlayCount > 0) && Math.Abs(pulse(AnimationClock.Now) - drawnGlow) >= 1 / 32.0;
                     if (newFrame || redraw || glowChanged) Render(newFrame);
                     if (stopping) break;
 
-                    // 每秒確認一次顯示卡裝置還在（驅動更新、顯示卡重設時會失效）
-                    if (Environment.TickCount - lastDeviceCheck > 1000)
+                    // 每秒確認一次顯示卡裝置還在（驅動更新、顯示卡重設時會失效）；差是負的（計時從頭繞回來）也算到了
+                    int sinceCheck = Environment.TickCount - lastDeviceCheck;
+                    if (sinceCheck > 1000 || sinceCheck < 0)
                     {
                         lastDeviceCheck = Environment.TickCount;
                         int reason = ((ID3D11Device)deviceObject).GetDeviceRemovedReason();
                         if (reason != 0) { Lost(Lang.T("顯示卡裝置失效 0x", "Graphics device lost 0x") + reason.ToString("X8")); break; }
                     }
 
-                    if (playing)
+                    if (playing && engine != null || engine == null && redraw)
                     {
-                        // 跟著螢幕更新頻率走；拿不到螢幕（例如鎖定中）就退回用睡的
+                        // 跟著螢幕更新頻率走；拿不到螢幕（例如鎖定中）就退回用睡的。
+                        // 圖片：只有在畫動畫（鎖定畫面滑動、歌詞、液態玻璃、進度條）時才跟著螢幕更新
                         if (output == null || output.WaitForVBlank() < 0) Thread.Sleep(8);
                     }
-                    else wake.WaitOne(redraw ? 15 : 250);
+                    else if (engine == null && pulse != null && targets.Exists(t => t.OverlayCount > 0))
+                        wake.WaitOne(16);   // 圖片：鎖定畫面開著、光暈開著：常常看一下重拍（光暈變了才畫）
+                    else if (engine == null && imageInterval > 0)
+                        wake.WaitOne(Math.Max(8, Math.Min(imageInterval, imageInterval - (Environment.TickCount - imageFrameTick))));   // 圖片：等到進度條該往前走的時候
+                    else wake.WaitOne(redraw ? 15 : engine == null ? 1000 : 250);
                 }
             }
             catch (Exception ex)
@@ -250,8 +294,12 @@ namespace VideoWallpaper
 
         void Init()
         {
-            Check(MFStartup(0x20070, 0), "MFStartup");
-            mfStarted = true;
+            lastDeviceCheck = Environment.TickCount;
+            if (!isImage)   // 圖片不用 Media Foundation
+            {
+                Check(MFStartup(0x20070, 0), "MFStartup");
+                mfStarted = true;
+            }
 
             int[] levels = { 0xb100, 0xb000, 0xa100, 0xa000, 0x9300 };
             int level;
@@ -259,13 +307,18 @@ namespace VideoWallpaper
             int hr = D3D11CreateDevice(IntPtr.Zero, 1, IntPtr.Zero, BGRA | VIDEO, levels, (uint)levels.Length, 7, out device, out level, out context);
             if (hr < 0) hr = D3D11CreateDevice(IntPtr.Zero, 1, IntPtr.Zero, BGRA, levels, (uint)levels.Length, 7, out device, out level, out context);
             Check(hr, "D3D11CreateDevice");
+            featureLevel = level;
+            LiquidGlass.Prepare();   // 液態玻璃的著色器在背景先編好（鎖定畫面打開時才用得到）
             deviceObject = Marshal.GetObjectForIUnknown(device);
             ((ID3D10Multithread)deviceObject).SetMultithreadProtected(1);   // Media Engine 會從別的執行緒使用這個裝置
             d2dFactory = D2DTarget.CreateFactory();
 
-            uint resetToken;
-            Check(MFCreateDXGIDeviceManager(out resetToken, out manager), "MFCreateDXGIDeviceManager");
-            Check(manager.ResetDevice(device, resetToken), "ResetDevice");
+            if (!isImage)
+            {
+                uint resetToken;
+                Check(MFCreateDXGIDeviceManager(out resetToken, out manager), "MFCreateDXGIDeviceManager");
+                Check(manager.ResetDevice(device, resetToken), "ResetDevice");
+            }
 
             IDXGIAdapter adapter;
             Check(((IDXGIDevice)deviceObject).GetAdapter(out adapter), "GetAdapter");
@@ -276,6 +329,8 @@ namespace VideoWallpaper
             IDXGIOutput firstOutput;
             if (adapter.EnumOutputs(0, out firstOutput) == 0) output = firstOutput;
             Marshal.ReleaseComObject(adapter);
+
+            if (isImage) { InitImage(); return; }
 
             IMFAttributes attributes;
             Check(MFCreateAttributes(out attributes, 3), "MFCreateAttributes");
@@ -293,6 +348,53 @@ namespace VideoWallpaper
             engine.SetPreload(4);    // MF_MEDIA_ENGINE_PRELOAD_AUTOMATIC：還沒播放也先解碼好第一格（桌面被蓋住、暫停中也有畫面可以先畫上去）
             engine.SetMuted(initialMuted ? 1 : 0);
             if (!SetSourceFromMemory()) Check(engine.SetSource(path), "SetSource");
+        }
+
+        // 圖片桌布、鎖定畫面開著時：卡片的進度條在走的話，多久要重畫一次（毫秒；走一像素要多久，33～1000）；不用定時重畫回傳 0
+        int ImageRedrawInterval()
+        {
+            int best = 0;
+            foreach (var t in targets)
+            {
+                var c = t.Liquid;
+                if (t.OverlayCount == 0 || c == null || c.Spec == null || !c.Playing || c.Duration <= 0) continue;
+                double width = Math.Max(1, c.Spec.ProgressX1 - c.Spec.ProgressX0);
+                int ms = (int)Math.Max(33, Math.Min(1000, c.Duration * 1000 / width));
+                if (best == 0 || ms < best) best = ms;
+            }
+            return best;
+        }
+
+        // 圖片桌布：解碼（WPF 的圖片解碼器要在 STA 執行緒上用，另開一條；不佔畫面執行緒）、放上顯示卡；
+        // 讀不了、顯示卡不行就回報錯誤
+        void InitImage()
+        {
+            byte[] pixels = null;
+            int width = 0, height = 0;
+            string error = null;
+            var decoder = new Thread(delegate()
+            {
+                try { pixels = ImageLayer.Decode(path, out width, out height); }
+                catch (Exception ex) { error = ex.Message; }
+                Dispatcher.CurrentDispatcher.InvokeShutdown();   // 圖片解碼器替這條執行緒建了 Dispatcher（和它的隱藏視窗）：收掉
+            }) { IsBackground = true, Name = "ImageDecode" };
+            decoder.SetApartmentState(ApartmentState.STA);
+            decoder.Start();
+            // 等解碼的時候也回報「還活著」：很大的圖要解好幾秒，不然監控會以為引擎卡死、一直重建
+            while (!decoder.Join(500)) lastHealthyTick = Environment.TickCount;
+            lastHealthyTick = Environment.TickCount;
+            if (pixels == null) { ReportError(Lang.T("無法讀取這張圖片：", "Can't read this image: ") + error); return; }
+            string why;
+            image = ImageLayer.Create(device, context, featureLevel, pixels, width, height, out why);
+            // 解碼出來的像素（最多 64 MB）已經放上顯示卡：馬上還回去，不用等之後哪一次 GC（程式閒著時可能很久都不會有）
+            pixels = null;
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            if (image == null) { ReportError(Lang.T("無法顯示這張圖片：", "Can't show this image: ") + why); return; }
+            imageFrameTick = Environment.TickCount;
+            frameReady = true;
+            redraw = redrawAll = true;
         }
 
         // 整支影片先讀進記憶體，播放器之後都從記憶體讀，不會再碰硬碟：
@@ -350,9 +452,11 @@ namespace VideoWallpaper
         static void ReleaseTarget(Target t)
         {
             t.ReleaseOverlays();
+            ReleaseLiquid(t);
             t.Canvas = null;
             if (t.D2D != null) { t.D2D.Release(); t.D2D = null; }
             if (t.Surface != null) Marshal.ReleaseComObject(t.Surface);
+            if (t.ImageRtv != IntPtr.Zero) { Marshal.Release(t.ImageRtv); t.ImageRtv = IntPtr.Zero; }
             if (t.VideoTexture != IntPtr.Zero) { Marshal.Release(t.VideoTexture); t.VideoTexture = IntPtr.Zero; }
             if (t.BackBuffer != IntPtr.Zero) Marshal.Release(t.BackBuffer);
             if (t.SwapChain != null) Marshal.ReleaseComObject(t.SwapChain);
@@ -410,7 +514,9 @@ namespace VideoWallpaper
             bool all = newFrame || redrawAll;
             redraw = redrawAll = false;
             uint vw, vh;
-            if (engine.GetNativeVideoSize(out vw, out vh) < 0 || vw == 0 || vh == 0) return;
+            if (engine != null) { if (engine.GetNativeVideoSize(out vw, out vh) < 0 || vw == 0 || vh == 0) return; }
+            else if (image != null) { vw = (uint)image.Width; vh = (uint)image.Height; }
+            else return;
             var border = new MFARGB { Alpha = 255 };   // 黑邊
             bool anyVisible = false;
             foreach (var t in targets)
@@ -424,7 +530,8 @@ namespace VideoWallpaper
                 Fit(vw, vh, t.Width, t.Height, stretch, out src, out dst);
                 // 影片沒換格、而且留著的那份已經是最新的（只是疊圖在動，例如光暈、歌詞捲動）：直接拿來用
                 t.FreshVideo = newFrame || !t.VideoCurrent || t.VideoTexture == IntPtr.Zero;
-                int hr = t.FreshVideo ? engine.TransferVideoFrame(t.VideoTexture != IntPtr.Zero ? t.VideoTexture : t.BackBuffer, ref src, ref dst, ref border) : 0;
+                IntPtr into = t.VideoTexture != IntPtr.Zero ? t.VideoTexture : t.BackBuffer;
+                int hr = !t.FreshVideo ? 0 : engine != null ? engine.TransferVideoFrame(into, ref src, ref dst, ref border) : DrawImage(t, into, src, dst);
                 t.VideoCurrent = hr >= 0 && t.VideoTexture != IntPtr.Zero;
                 if (hr < 0)
                 {
@@ -432,10 +539,16 @@ namespace VideoWallpaper
                     if (newFrame && ++transferFailures > 120) { Lost(Lang.T("複製影片畫面一直失敗 0x", "Copying video frames keeps failing 0x") + hr.ToString("X8")); return; }
                     // 第一格還沒畫上去（影片可能還沒解碼好）：暫停中也要再試，最多試約 3 秒
                     if (!t.Presented && ++t.FirstFrameTries < 200) redraw = redrawAll = true;
+                    else if (engine == null && t.FirstFrameTries == 200) ReportError(Lang.T("無法顯示這張圖片（顯示卡畫不上去）", "Can't show this image (the graphics card couldn't draw it)"));
                     continue;
                 }
                 transferFailures = 0;
                 if (t.VideoTexture != IntPtr.Zero) copyResource(context, t.BackBuffer, t.VideoTexture);   // 乾淨的影片整張蓋上去，再貼疊圖
+                if (t.Liquid != null || t.Motion != null)
+                {
+                    if (DrawLiquidBase(t, AnimationClock.Now)) redraw = true;   // 卡片的液態玻璃（在影片上、疊圖底下）；卡片還在動就再畫下一格
+                }
+                else t.LiquidActive = false;
                 if (DrawOverlay(t)) redraw = true;   // 歌詞捲動、淡入淡出中：下一次螢幕更新再畫一次
                 hr = t.SwapChain.Present(0, 0);
                 if (hr < 0) { Lost(Lang.T("輸出畫面失敗 0x", "Presenting the frame failed 0x") + hr.ToString("X8")); return; }
@@ -444,6 +557,15 @@ namespace VideoWallpaper
                 if (hr == 0 && newFrame) presentedFrames++;
             }
             if (!anyVisible) lastHealthyTick = Environment.TickCount;   // 全部被蓋住時本來就不畫
+        }
+
+        // 圖片桌布：照縮放方式把圖片畫進 into（影片畫布或輸出畫面）；失敗回傳負的（跟 TransferVideoFrame 一樣）
+        int DrawImage(Target t, IntPtr into, MFVideoNormalizedRect src, D3DRect dst)
+        {
+            if (t.ImageRtv == IntPtr.Zero) t.ImageRtv = image.CreateTargetView(into);
+            if (t.ImageRtv == IntPtr.Zero) return -1;
+            image.Draw(t.ImageRtv, dst.Left, dst.Top, dst.Right - dst.Left, dst.Bottom - dst.Top, src.Left, src.Top, src.Right - src.Left, src.Bottom - src.Top);
+            return 0;
         }
 
         // 引擎已經不能用了：停下來，請 UI 執行緒整個重建
@@ -511,6 +633,8 @@ namespace VideoWallpaper
                 if (engine != null) { engine.Shutdown(); Marshal.ReleaseComObject(engine); engine = null; }
                 foreach (var t in targets) ReleaseTarget(t);
                 targets.Clear();
+                if (image != null) { image.Release(); image = null; }
+                if (liquid != null) { liquid.Release(); liquid = null; }
                 if (output != null) Marshal.ReleaseComObject(output);
                 if (d2dFactory != IntPtr.Zero) { Marshal.Release(d2dFactory); d2dFactory = IntPtr.Zero; }
                 if (factory != null) Marshal.ReleaseComObject(factory);

@@ -20,6 +20,7 @@ namespace VideoWallpaper
         public bool Muted = true;
         public bool AutoPause = true;
         public bool TaskbarFix = true;   // 工作列透明（搭配 TranslucentTB）
+        public bool BeatGlow = true;     // 鎖定畫面的音樂卡片跟著重拍發光
         public Stretch Stretch = Stretch.UniformToFill;
         public string WeatherLocation = "";   // 選填：「緯度,經度」，不填就用 IP 自動判斷位置
 
@@ -44,6 +45,7 @@ namespace VideoWallpaper
                     else if (key == "muted") s.Muted = value == "1";
                     else if (key == "autopause") s.AutoPause = value == "1";
                     else if (key == "taskbarfix") s.TaskbarFix = value == "1";
+                    else if (key == "beatglow") s.BeatGlow = value == "1";
                     else if (key == "stretch") { Stretch st; if (Enum.TryParse(value, out st)) s.Stretch = st; }
                     else if (key == "weatherlocation") s.WeatherLocation = value;
                 }
@@ -61,6 +63,7 @@ namespace VideoWallpaper
                     "muted=" + (Muted ? "1" : "0"),
                     "autopause=" + (AutoPause ? "1" : "0"),
                     "taskbarfix=" + (TaskbarFix ? "1" : "0"),
+                    "beatglow=" + (BeatGlow ? "1" : "0"),
                     "stretch=" + Stretch,
                     "weatherlocation=" + WeatherLocation,
                 }, Encoding.UTF8);

@@ -1,205 +1,275 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
 using System.Windows;
-using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
 namespace VideoWallpaper
 {
-    // 右下角的音樂卡片：版面、按鈕、音量元件
+    // 右下角的音樂卡片：照 macOS Tahoe 鎖定畫面「正在播放」的樣子，卡片本身是播放引擎畫的液態玻璃。
+    // 以 1080p 為準：卡片 400 × 198、邊距 16、封面 72（圓角 10，所以卡片圓角 26，跟封面同心）；
+    // 封面右邊是歌名（16 半粗）和「歌手 — 專輯」（13，白 70%），右上角歌詞圓鈕；中間是時間 — 進度條 — 剩下的時間；
+    // 最下面是隨機播放、⏪ ⏯ ⏩（實心、放大）、循環。進度條、歌詞圓鈕的底和玻璃由播放引擎畫（拖曳時才順）
     static partial class LockClock
     {
         // 音樂卡片：好幾張同樣大小、疊在同樣位置的圖（播放引擎各自做動畫）
         public class MusicCard
         {
-            public int[] Chrome;   // 毛玻璃底＋邊框（不動）
-            public int[] Info;     // 歌名、歌手、播放按鈕（換歌時整頁滑動；沒有封面時的音符方塊也在這張）
-            public int[] Mic;      // 歌詞按鈕（全亮畫好，亮度交給播放引擎慢慢調）
-            public int[] Volume;   // 喇叭（音量變了只重畫這張和 VolumeBar）
-            public int[] VolumeBar;   // 音量滑桿（平常收起來，滑鼠停在喇叭上才展開）
-            public CardColor Color;   // 卡片的底色（封面糊成一片的顏色，或跟著封面色相的漸層；疊在毛玻璃上、會慢慢飄動）和帶顏色的邊框
-            public int[] Cover;       // 專輯封面（不加陰影，跟著換歌一起翻頁；沒有封面是 null）
+            public int[] Chrome;      // 沒有液態玻璃時（舊顯示卡）退回的毛玻璃樣子：霧白、上緣反光、顆粒、邊框
+            public int[] Info;        // 歌名、「歌手 — 專輯」（換歌時跟封面一起滑動、淡入淡出）
+            public int[] Cover;       // 專輯封面（帶淡淡的影子；沒有封面時是半透明方塊和音符）
+            public int[] Buttons;     // 隨機播放 / 上一首 / 播放暫停 / 下一首 / 循環（換歌時不動）
+            public int[] Mic, MicOn;  // 歌詞圓鈕上的圖示：白色（沒開）、深色（開著時底是白的）
+            public CardColor Color;   // 重拍時邊框泛出的光暈（跟著封面的顏色）
             public string ColorKey;   // 顏色有沒有變（換歌時顏色變了才淡入淡出）
-            public int Width, Height, X, Y;        // 每張圖的大小和位置（四周有留給陰影的空間）
-            public int InnerX, InnerY, InnerW, InnerH;   // 卡片本身在螢幕上的範圍（扣掉陰影的空間）
-            public double TrackLeft, TrackWidth;   // 音量滑桿在螢幕上的左端和長度（點或拖曳時換算成音量）
-            public int RevealX, RevealW;           // 音量滑桿在圖上的範圍（展開動畫從左邊長出來）
-            public double KnobRadius;              // 把手的半徑（展開時把手保持原樣，不跟著拉長）
-            internal CardLayout Layout;            // 畫這張卡片的版面（音量變了只要改滑桿再畫兩張，不用整個重排）
-
-            // 音量是 volume 時，把手中心在圖上的位置
-            public double KnobX(double volume) { return TrackLeft - X + TrackWidth * Math.Max(0, Math.Min(1, volume)); }
-
-            public bool InnerContains(int x, int y) { return x >= InnerX && x < InnerX + InnerW && y >= InnerY && y < InnerY + InnerH; }
-
-            // 音量變了：只改滑桿和喇叭圖示，重畫喇叭和滑桿那兩張（跟卡片其他圖一樣大小、一樣位置）
-            public int[] RenderVolume(double volume, out int[] bar) { return Layout.RenderVolume(volume, out bar); }
+            public int Width, Height, X, Y;                // 每張圖的大小和位置（四周有留給光暈的空間）
+            public int InnerX, InnerY, InnerW, InnerH;     // 卡片本身在螢幕上的範圍
+            public double Scale, Radius;                   // 以 1080p 為 1 的縮放、卡片的圓角
+            public double ProgressLeft, ProgressWidth;     // 進度條（拖曳時換算成秒數）
+            public VideoEngine.LiquidCardSpec Spec;        // 給播放引擎畫液態玻璃和卡片上的東西
         }
 
-        // 卡片的版面：同一個版面畫好幾次，每次只留一層（Hidden 會保留位置，每張圖完全對齊）
-        internal class CardLayout
-        {
-            public const int Chrome = 0, Info = 1, Mic = 2, Speaker = 3, Bar = 4;
-            readonly Border root;
-            readonly List<UIElement>[] layers;   // 照上面的編號：chrome、info、mic、喇叭、滑桿
-            readonly VolumeControl volume;
-            readonly int width, height;
+        // 卡片上的位置（1080p 的像素，以卡片左上角為 0）
+        // 版面照 macOS Tahoe 鎖定畫面的「正在播放」（400 × 198，約 2 : 1；沒有音量滑桿）：
+        //   上面：封面、歌名和歌手，右上角歌詞圓鈕；中間：時間 — 進度條 — 剩下的時間（同一列）；
+        //   最下面：隨機播放在最左、⏪ ⏸ ⏩ 放大置中（間隔約卡寬的 18%）、循環在最右。
+        // 封面圓角跟卡片同心：卡片 26 = 封面 10 + 邊距 16
+        const double CardW = 400, CardH = 198, CardPad = 16, ArtSize = 72, ArtRadius = 10, ColumnX = 100, ColumnW = 248;
+        const double TitleY = 45, SubtitleY = 66, LyricsX = 370, LyricsY = 52, LyricsR = 14;
+        const double ProgressY = 114, ProgressX0 = 64, ProgressX1 = 336;   // 兩端的時間在進度條左右（時間 13，留給「12:34」「−12:34」的寬度）
+        const double ControlsY = 162, ShuffleX = 40, PrevX = 128, PlayX = 200, NextX = 272, RepeatX = 360;
 
-            public CardLayout(Border root, List<UIElement>[] layers, VolumeControl volume, int width, int height)
-            {
-                this.root = root; this.layers = layers; this.volume = volume; this.width = width; this.height = height;
-            }
-
-            // 只顯示第 index 層、藏起其他層，畫一張
-            public int[] Snapshot(int index)
-            {
-                for (int i = 0; i < layers.Length; i++)
-                    foreach (var e in layers[i]) e.Visibility = i == index ? Visibility.Visible : Visibility.Hidden;
-                root.UpdateLayout();
-                return LockClock.Snapshot(root, width, height);
-            }
-
-            public int[] RenderVolume(double level, out int[] bar)
-            {
-                volume.Show(level);
-                bar = Snapshot(Bar);
-                return Snapshot(Speaker);
-            }
-        }
-
-        // 右下角：正在播放的歌（沒在播就回傳 null）。
-        // buttons：回傳各個按鈕在螢幕上的位置，讓鎖定畫面知道滑鼠點到哪個；volume：Spotify 現在的音量（0～1）
-        public static MusicCard RenderMusic(NowPlaying.Track track, int screenWidth, int screenHeight, double volume, List<KeyValuePair<Rect, string>> buttons)
+        // 右下角：正在播放的歌（沒在播就回傳 null）。playing：播放鍵畫成暫停（剛按了播放暫停時，照按下去的樣子，不等播放器回報）。
+        // buttons：回傳各個按鈕在螢幕上的位置，讓鎖定畫面知道滑鼠點到哪個
+        public static MusicCard RenderMusic(NowPlaying.Track track, bool playing, bool? shuffle, int? repeat, int screenWidth, int screenHeight, List<KeyValuePair<Rect, string>> buttons)
         {
             if (track == null) return null;
             double s = screenHeight / 1080.0;
-            double pad = ShadowPad(screenHeight);
-            var controls = new List<KeyValuePair<FrameworkElement, string>>();
-            var infoParts = new List<UIElement>();
-            var chromeParts = new List<UIElement>();
-            UIElement micPart;
-            VolumeControl volumeControl;
-            Border root;
-            var card = new MusicCard();
-            var art = DecodeArt(track.Art, (int)Math.Round(300 * s));
-            FrameworkElement coverSlot;
-            var content = BuildNowPlaying(track, art != null, s, controls, infoParts, chromeParts, out micPart, out volumeControl, out coverSlot);
-            Wrap(content, s, pad, out root, out card.Width, out card.Height);
-            // 封面另外畫（不加陰影，看起來是嵌在卡片裡，不是貼上去的照片），位置就是版面上留給它的那一格
-            if (art != null) card.Cover = RenderCover(art, card.Width, card.Height, coverSlot.TransformToAncestor(root).Transform(new Point(0, 0)), coverSlot.ActualWidth, s);
-            // 卡片的底色（另外畫，不加陰影，免得卡片外面多一圈影子）：有封面就是封面糊成一片的顏色；
-            // 沒有封面就用封面的色相或歌名算出來的漸層，每首歌都有顏色
-            var hues = AlbumHues(track.Art) ?? SongHues(Lyrics.SongKey(track));
-            card.Color = RenderCardColor(hues, art, card.Width, card.Height, pad, content.ActualWidth, content.ActualHeight, s);
-            card.ColorKey = string.Join(",", hues.Select(v => v.ToString("0.000", CultureInfo.InvariantCulture))) + "," + (art == null ? 0 : track.Art.Length);
+            int pad = ShadowPad(screenHeight);
+            var card = new MusicCard { Scale = s, Radius = CardRadius(s) };
+            card.InnerW = (int)Math.Round(CardW * s); card.InnerH = (int)Math.Round(CardH * s);
+            card.Width = card.InnerW + 2 * pad; card.Height = card.InnerH + 2 * pad;
             // 離右邊和下面一樣是 52（下緣跟左下角的時鐘對齊）
-            card.X = (int)Math.Round(screenWidth - 52 * s - card.Width + pad);
-            card.Y = (int)Math.Round(screenHeight - 52 * s - card.Height + pad);
-            card.InnerX = card.X + (int)pad; card.InnerY = card.Y + (int)pad;
-            card.InnerW = card.Width - 2 * (int)pad; card.InnerH = card.Height - 2 * (int)pad;
-            foreach (var c in controls)
-            {
-                var p = c.Key.TransformToAncestor(root).Transform(new Point(0, 0));
-                buttons.Add(new KeyValuePair<Rect, string>(new Rect(p.X + card.X, p.Y + card.Y, c.Key.RenderSize.Width, c.Key.RenderSize.Height), c.Value));
-            }
-            double trackLeft = volumeControl.Panel.TransformToAncestor(root).Transform(new Point(volumeControl.TrackLeft, 0)).X;
-            card.TrackLeft = trackLeft + card.X;
-            card.TrackWidth = volumeControl.TrackWidth;
-            // 展開的範圍：滑桿左右各多留把手的半徑和一點空間
-            double margin = volumeControl.KnobRadius + Math.Round(3 * s);
-            card.RevealX = (int)Math.Floor(trackLeft - margin);
-            card.RevealW = (int)Math.Ceiling(volumeControl.TrackWidth + 2 * margin);
-            card.KnobRadius = volumeControl.KnobRadius;
+            card.InnerX = (int)Math.Round(screenWidth - 52 * s - card.InnerW);
+            card.InnerY = (int)Math.Round(screenHeight - 52 * s - card.InnerH);
+            card.X = card.InnerX - pad; card.Y = card.InnerY - pad;
 
-            card.Layout = new CardLayout(root, new[] { chromeParts, infoParts, new List<UIElement> { micPart }, volumeControl.IconParts, volumeControl.BarParts },
-                volumeControl, card.Width, card.Height);
-            card.Chrome = card.Layout.Snapshot(CardLayout.Chrome);
-            card.Info = card.Layout.Snapshot(CardLayout.Info);
-            card.Mic = card.Layout.Snapshot(CardLayout.Mic);
-            card.Volume = card.RenderVolume(volume, out card.VolumeBar);
+            var art = DecodeArt(track.Art, (int)Math.Round(300 * s));
+            card.Chrome = Layer(card, dc => DrawChrome(dc, card));
+            card.Info = Layer(card, dc => DrawInfo(dc, card, track));
+            card.Buttons = RenderButtons(card, playing, shuffle, repeat);
+            card.Cover = RenderCover(card, art);
+            card.Mic = Layer(card, dc => DrawLyricsIcon(dc, s, Brushes.White));
+            card.MicOn = Layer(card, dc => DrawLyricsIcon(dc, s, new SolidColorBrush(Color.FromRgb(40, 40, 46))));
+
+            // 卡片的顏色：有封面就照封面的色相，沒有就用歌名算一個（每首歌都有顏色）
+            var hues = AlbumHues(track.Art) ?? SongHues(Lyrics.SongKey(track));
+            card.Color = RenderCardColor(hues, card.Width, card.Height, pad, card.InnerW, card.InnerH, card.Radius, s);
+            card.ColorKey = string.Join(",", Array.ConvertAll(hues, v => v.ToString("0.000", CultureInfo.InvariantCulture))) + "," + (art == null ? 0 : track.Art.Length);
+            var tint = Hsl(hues[0], Math.Max(0.35, Math.Min(0.8, hues[1])), 0.45, 255);
+            double top = Math.Max(tint.R, Math.Max(tint.G, Math.Max(tint.B, (byte)1))) / 0.75;   // 最亮的那個顏色調到 0.75
+
+            Func<double, double> sx = x => card.InnerX + x * s;
+            Func<double, double> sy = y => card.InnerY + y * s;
+            card.ProgressLeft = sx(ProgressX0); card.ProgressWidth = (ProgressX1 - ProgressX0) * s;
+            card.Spec = new VideoEngine.LiquidCardSpec
+            {
+                X = card.InnerX, Y = card.InnerY, W = card.InnerW, H = card.InnerH, Radius = card.Radius, Scale = s,
+                TintR = tint.R / top, TintG = tint.G / top, TintB = tint.B / top,
+                ProgressX0 = sx(ProgressX0), ProgressX1 = sx(ProgressX1), ProgressY = sy(ProgressY),
+                LyricsX = sx(LyricsX), LyricsY = sy(LyricsY), LyricsR = LyricsR * s,
+            };
+
+            // 點的範圍：按鈕 32 ～ 40 寬、36 高；進度條上下各 10
+            Action<double, double, double, double, string> hit = (x, y, w, h, action) => buttons.Add(new KeyValuePair<Rect, string>(new Rect(sx(x), sy(y), w * s, h * s), action));
+            hit(ShuffleX - 16, ControlsY - 18, 32, 36, "shuffle");
+            hit(PrevX - 20, ControlsY - 18, 40, 36, "prev");
+            hit(PlayX - 20, ControlsY - 18, 40, 36, "toggle");
+            hit(NextX - 20, ControlsY - 18, 40, 36, "next");
+            hit(RepeatX - 16, ControlsY - 18, 32, 36, "repeat");
+            hit(LyricsX - 16, LyricsY - 16, 32, 32, "lyrics");
+            hit(ProgressX0 - 6, ProgressY - 10, ProgressX1 - ProgressX0 + 12, 20, "progress");
             return card;
         }
 
-        // 橫向的卡片（半透明深色圓角長方形）：左邊專輯封面；右邊上面歌名、下面歌手，
-        // 再下面一排上一首、播放暫停、下一首、音量，最右邊是歌詞按鈕
-        // info：歌名、歌手、播放按鈕（換歌時整頁滑動；封面另外畫，見 RenderCover，也跟著滑）；mic：歌詞按鈕（也跟著滑，亮度另外調）；
-        // volume：喇叭和音量滑桿（也跟著滑，音量變了單獨重畫）；chrome：卡片的毛玻璃底和邊框（不動）
-        static FrameworkElement BuildNowPlaying(NowPlaying.Track track, bool hasArt, double s, List<KeyValuePair<FrameworkElement, string>> controls,
-            List<UIElement> info, List<UIElement> chrome, out UIElement mic, out VolumeControl volume, out FrameworkElement coverSlot)
+        // 兩端的時間（已經播了多久、還剩多久）：跟卡片其他圖一樣大小、一樣位置，每秒換一次；不知道歌曲長度就是 null
+        public static int[] RenderTime(MusicCard card, double position, double duration)
         {
-            var row = new StackPanel { Orientation = Orientation.Horizontal };
-
-            // 有封面：封面另外畫（RenderCover，不加陰影），這裡只留位置；沒有封面才顯示半透明方塊和音符
-            double artSize = Math.Round(76 * s);
-            var cover = new Border { Width = artSize, Height = artSize };
-            coverSlot = cover;
-            if (!hasArt)
+            if (card == null || duration <= 0) return null;
+            position = Math.Max(0, Math.Min(duration, position));
+            double s = card.Scale;
+            return Layer(card, dc =>
             {
-                cover.CornerRadius = new CornerRadius(8 * s);
-                cover.Background = new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
-                cover.Child = new TextBlock { Text = "", FontFamily = IconFont, FontSize = 30 * s, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+                var brush = new SolidColorBrush(Color.FromArgb(0xA6, 255, 255, 255));   // 白 65%（玻璃後面是亮的桌布也讀得清楚）
+                // 跟進度條同一列（字的中線對齊進度條）：左邊已經播了多久、右邊還剩多久
+                DrawText(dc, Clock(position), 13 * s, FontWeights.Medium, brush, CardPad * s, (ProgressY + 5) * s, double.MaxValue, false);
+                DrawText(dc, "−" + Clock(duration - position), 13 * s, FontWeights.Medium, brush, (CardW - CardPad) * s, (ProgressY + 5) * s, double.MaxValue, true);
+            });
+        }
+
+        // 秒數 → 「3:07」（超過一小時「1:03:07」）
+        static string Clock(double seconds)
+        {
+            var t = TimeSpan.FromSeconds(Math.Floor(seconds));
+            return t.TotalHours >= 1 ? string.Format(CultureInfo.InvariantCulture, "{0}:{1:00}:{2:00}", (int)t.TotalHours, t.Minutes, t.Seconds)
+                                     : string.Format(CultureInfo.InvariantCulture, "{0}:{1:00}", t.Minutes, t.Seconds);
+        }
+
+        // 畫一張跟卡片其他圖一樣大小的圖：draw 裡的座標以卡片左上角為 0（螢幕像素）
+        static int[] Layer(MusicCard card, Action<DrawingContext> draw)
+        {
+            var visual = new DrawingVisual();
+            using (var dc = visual.RenderOpen())
+            {
+                dc.PushTransform(new TranslateTransform(card.InnerX - card.X, card.InnerY - card.Y));
+                draw(dc);
+                dc.Pop();
             }
-            row.Children.Add(cover);
-            info.Add(cover);
+            return Snapshot(visual, card.Width, card.Height);
+        }
 
-            // 右邊固定寬度：不管歌名長短，卡片大小和按鈕位置都一樣（太長的歌名會顯示「…」）
-            double buttonSize = Math.Round(32 * s);
-            var right = new StackPanel { Margin = new Thickness(12 * s, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, Width = Math.Round(196 * s) };
-            var title = new TextBlock { Text = track.Title, FontFamily = ClockFont, FontSize = 16 * s, FontWeight = FontWeights.SemiBold, Foreground = Brushes.White, TextTrimming = TextTrimming.CharacterEllipsis };
-            var artist = new TextBlock { Text = track.Artist, FontFamily = ClockFont, FontSize = 13 * s, Foreground = new SolidColorBrush(Color.FromArgb(0xC8, 255, 255, 255)), TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0, 1 * s, 0, 0) };
-            right.Children.Add(title);
-            right.Children.Add(artist);
-            info.Add(title);
-            info.Add(artist);
+        // 歌名、「歌手 — 專輯」
+        static void DrawInfo(DrawingContext dc, MusicCard card, NowPlaying.Track track)
+        {
+            double s = card.Scale;
+            string subtitle = string.IsNullOrEmpty(track.Album) || track.Album == track.Title ? track.Artist
+                : string.IsNullOrEmpty(track.Artist) ? track.Album : track.Artist + " — " + track.Album;
+            DrawText(dc, track.Title, 16 * s, FontWeights.SemiBold, Brushes.White, ColumnX * s, TitleY * s, ColumnW * s, false);
+            DrawText(dc, subtitle, 13 * s, FontWeights.Normal, new SolidColorBrush(Color.FromArgb(0xB3, 255, 255, 255)), ColumnX * s, SubtitleY * s, ColumnW * s, false);
+        }
 
-            // 按鈕列：左邊上一首、播放暫停、下一首（第一個圖示跟文字左邊對齊），右邊歌詞
-            double inset = (buttonSize - 15 * s) / 2;
-            var bar = new Grid { Margin = new Thickness(-inset, 3 * s, -inset, -inset / 2) };
-            var playback = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Left };
-            AddControl(playback, "", "prev", s, buttonSize, controls);
-            AddControl(playback, track.Playing ? "" : "", "toggle", s, buttonSize, controls);
-            AddControl(playback, "", "next", s, buttonSize, controls);
-            bar.Children.Add(playback);
-            info.Add(playback);
-            // 歌詞（斜放的麥克風）：畫成全亮，亮度（顯示中全白、有歌詞但沒開半亮、沒有歌詞很暗）交給播放引擎慢慢變
-            var lyricsHost = new StackPanel { HorizontalAlignment = HorizontalAlignment.Right };
-            var lyrics = AddControl(lyricsHost, "", "lyrics", s, buttonSize, controls);
-            lyrics.Child = MicIcon(s);
-            mic = lyricsHost;
-            bar.Children.Add(lyricsHost);
-            // 音量：下一首和歌詞按鈕中間的空間
-            double barWidth = Math.Round(196 * s) + 2 * inset;
-            volume = BuildVolume(s, buttonSize, barWidth - 4 * buttonSize, controls);
-            volume.Panel.HorizontalAlignment = HorizontalAlignment.Left;
-            volume.Panel.Margin = new Thickness(3 * buttonSize, 0, 0, 0);
-            bar.Children.Add(volume.Panel);
-            right.Children.Add(bar);
-            row.Children.Add(right);
-            // 按鈕跟著一起翻頁（固定不動的話，滑過去的封面會蓋到按鈕）：播放按鈕在 info、歌詞按鈕在 mic、音量在 volume，三張一起滑
+        // ⏪ ⏯ ⏩（跟卡片其他圖一樣大小、一樣位置）：按播放暫停時只換這張，很快
+        // shuffle / repeat：隨機播放、循環的狀態（null：播放器不支援，畫得很淡）
+        public static int[] RenderButtons(MusicCard card, bool playing, bool? shuffle, int? repeat)
+        {
+            return Layer(card, dc => DrawButtons(dc, card, playing, shuffle, repeat));
+        }
 
-            // 毛玻璃：最底下是播放引擎糊掉的影片（看得到後面燈光的模糊輪廓），
-            // 上面只疊很淡的霧白、上緣一道反光、細微的顆粒，讓後面的顏色透出來
-            var radius = new CornerRadius(CardRadius(s));
-            var card = new Grid();
-            var tint = new Border { CornerRadius = radius, Background = new SolidColorBrush(Color.FromArgb(0x0D, 255, 255, 255)) };   // 5% 霧白
+        static void DrawButtons(DrawingContext dc, MusicCard card, bool playing, bool? shuffle, int? repeat)
+        {
+            double s = card.Scale;
+            // 照 macOS 的實心符號：圓角三角形（兩個接在一起是上一首 / 下一首）、圓角直條（暫停）；▶ 最亮，旁邊兩個淡一點
+            var white = Brushes.White;
+            Action<double, double, Geometry> icon = (x, alpha, g) =>
+            {
+                dc.PushTransform(new TranslateTransform(x * s, ControlsY * s));
+                dc.PushTransform(new ScaleTransform(1.45 * s, 1.45 * s));   // macOS 的鍵比較大
+                dc.PushOpacity(alpha);
+                dc.DrawGeometry(white, null, g);
+                dc.Pop(); dc.Pop(); dc.Pop();
+            };
+            icon(PrevX, 0.82, Skip(-1));
+            icon(PlayX, 0.95, playing ? Pause() : RoundedTriangle(-7.5, 18, 16.5, 1, 2.2));
+            icon(NextX, 0.82, Skip(1));
+            // 隨機播放、循環（Segoe 的圖示）：開著是全白、下面一個小點；關著半透明；播放器不支援就很淡
+            mode(dc, s, ShuffleX, "\uE8B1", shuffle.HasValue, shuffle == true);
+            mode(dc, s, RepeatX, repeat == 1 ? "\uE8ED" : "\uE8EE", repeat.HasValue, repeat.HasValue && repeat.Value != 0);
+        }
+
+        static readonly Typeface ModeIcons = new Typeface(new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+
+        static void mode(DrawingContext dc, double s, double x, string glyph, bool supported, bool on)
+        {
+            var text = new FormattedText(glyph, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, ModeIcons, 15 * s, Brushes.White, 1.0);
+            dc.PushOpacity(!supported ? 0.25 : on ? 1.0 : 0.5);
+            dc.DrawText(text, new Point(x * s - text.Width / 2, ControlsY * s - text.Height / 2));
+            if (on) dc.DrawEllipse(Brushes.White, null, new Point(x * s, (ControlsY + 11.5) * s), 1.6 * s, 1.6 * s);
+            dc.Pop();
+        }
+
+        static Geometry Skip(int dir)
+        {
+            var g = new GeometryGroup();
+            g.Children.Add(RoundedTriangle(-11 * dir, 14, 11, dir, 1.7));
+            g.Children.Add(RoundedTriangle(0, 14, 11, dir, 1.7));
+            g.Freeze();
+            return g;
+        }
+
+        static Geometry Pause()
+        {
+            var g = new GeometryGroup();
+            g.Children.Add(new RectangleGeometry(new Rect(-7, -9, 5, 18), 1.5, 1.5));
+            g.Children.Add(new RectangleGeometry(new Rect(2, -9, 5, 18), 1.5, 1.5));
+            g.Freeze();
+            return g;
+        }
+
+        // 三個角都是圓角（半徑 r）的三角形：直邊在 x0（高 h），尖端朝 dir（1 右、-1 左）、離直邊 w
+        static Geometry RoundedTriangle(double x0, double h, double w, int dir, double r)
+        {
+            var pts = new[] { new Point(x0, -h / 2), new Point(x0 + dir * w, 0), new Point(x0, h / 2) };
+            var g = new StreamGeometry();
+            using (var ctx = g.Open())
+            {
+                for (int i = 0; i < 3; i++)
+                {
+                    Point prev = pts[(i + 2) % 3], p = pts[i], next = pts[(i + 1) % 3];
+                    Vector a = prev - p, b = next - p;
+                    a.Normalize(); b.Normalize();
+                    double angle = Math.Acos(Math.Max(-1, Math.Min(1, a.X * b.X + a.Y * b.Y)));
+                    double t = r / Math.Tan(angle / 2);   // 圓角跟兩條邊相切的點離角多遠
+                    Point p1 = p + a * t, p2 = p + b * t;
+                    if (i == 0) ctx.BeginFigure(p1, true, true); else ctx.LineTo(p1, true, true);
+                    Vector e1 = p - prev, e2 = next - p;
+                    bool clockwise = e1.X * e2.Y - e1.Y * e2.X > 0;   // 螢幕座標（y 往下）：往右轉就是順時針
+                    ctx.ArcTo(p2, new Size(r, r), 0, false, clockwise ? SweepDirection.Clockwise : SweepDirection.Counterclockwise, true, true);
+                }
+            }
+            g.Freeze();
+            return g;
+        }
+
+        // 歌詞圓鈕上的圖示：對話框裡一個引號（Apple Music 的歌詞圖示）；圓鈕的底由播放引擎畫
+        static void DrawLyricsIcon(DrawingContext dc, double s, Brush ink)
+        {
+            dc.PushTransform(new TranslateTransform(LyricsX * s, LyricsY * s));
+            dc.PushTransform(new ScaleTransform(s, s));
+            var pen = new Pen(ink, 1.3) { LineJoin = PenLineJoin.Round };
+            dc.DrawRoundedRectangle(null, pen, new Rect(-6.5, -6, 13, 10), 3, 3);
+            var tail = new StreamGeometry();
+            using (var ctx = tail.Open())
+            {
+                ctx.BeginFigure(new Point(-4, 3.5), true, true);
+                ctx.LineTo(new Point(-5, 7.2), true, true);
+                ctx.LineTo(new Point(-0.5, 3.5), true, true);
+            }
+            dc.DrawGeometry(ink, null, tail);
+            var quote = Text("”", 11, FontWeights.Bold, ink);
+            dc.DrawText(quote, new Point(0.3 - quote.Width / 2, 6 - quote.Baseline));
+            dc.Pop(); dc.Pop();
+        }
+
+        // 沒有液態玻璃時退回的毛玻璃：很淡的霧白、上緣一道反光、細微的顆粒、玻璃邊緣
+        static void DrawChrome(DrawingContext dc, MusicCard card)
+        {
+            var rect = new Rect(0, 0, card.InnerW, card.InnerH);
+            double r = card.Radius;
+            dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromArgb(0x0D, 255, 255, 255)), null, rect, r, r);   // 5% 霧白
             var sheen = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = new Point(0, 1) };
             sheen.GradientStops.Add(new GradientStop(Color.FromArgb(0x1C, 255, 255, 255), 0));
             sheen.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, 255, 255, 255), 0.55));
-            var shine = new Border { CornerRadius = radius, Background = sheen };                                                     // 上緣反光
-            var grain = new Border { CornerRadius = radius, Background = NoiseBrush() };                                              // 顆粒
-            // 玻璃邊緣：1.5 像素寬、淡一點（跟 1 像素的亮度差不多）。1 像素的細線繞小圓角時，反鋸齒只能一格一格地畫，
-            // 在像素比較大的螢幕上看得出階梯；寬一點的線，圓角才平滑
-            var edge = new Border { CornerRadius = radius, BorderBrush = new SolidColorBrush(Color.FromArgb(0x30, 255, 255, 255)), BorderThickness = new Thickness(EdgeWidth) };
-            card.Children.Add(tint);
-            card.Children.Add(shine);
-            card.Children.Add(grain);
-            card.Children.Add(edge);
-            card.Children.Add(new Border { Child = row, Padding = new Thickness(CardPadding(s) + 1) });   // +1：邊框的寬度
-            chrome.Add(tint); chrome.Add(shine); chrome.Add(grain); chrome.Add(edge);
-            return card;
+            dc.DrawRoundedRectangle(sheen, null, rect, r, r);
+            dc.DrawRoundedRectangle(NoiseBrush(), null, rect, r, r);
+            double half = EdgeWidth / 2;
+            dc.DrawRoundedRectangle(null, new Pen(new SolidColorBrush(Color.FromArgb(0x30, 255, 255, 255)), EdgeWidth),
+                new Rect(half, half, card.InnerW - EdgeWidth, card.InnerH - EdgeWidth), r - half, r - half);
+        }
+
+        // 一行字：基線在 (x, baseline)；right = true 時 x 是右端；超過 maxWidth 顯示「…」
+        static void DrawText(DrawingContext dc, string text, double size, FontWeight weight, Brush brush, double x, double baseline, double maxWidth, bool right)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            var ft = Text(text, size, weight, brush);
+            if (maxWidth < double.MaxValue) { ft.MaxTextWidth = maxWidth; ft.MaxLineCount = 1; ft.Trimming = TextTrimming.CharacterEllipsis; }
+            dc.DrawText(ft, new Point(right ? x - ft.Width : x, baseline - ft.Baseline));
+        }
+
+        static FormattedText Text(string text, double size, FontWeight weight, Brush brush)
+        {
+            var typeface = new Typeface(CardFont, FontStyles.Normal, weight, FontStretches.Normal);
+            return new FormattedText(text, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight, typeface, size, brush, 1.0);
         }
 
         // 毛玻璃的細微顆粒（跟 Windows 壓克力效果一樣的雜訊）：固定的亂數種子，每次畫出來都一樣，不會閃
@@ -221,104 +291,6 @@ namespace VideoWallpaper
             noise = new ImageBrush(bitmap) { TileMode = TileMode.Tile, Viewport = new Rect(0, 0, size, size), ViewportUnits = BrushMappingMode.Absolute, Stretch = Stretch.None };
             noise.Freeze();
             return noise;
-        }
-
-        // 斜放的麥克風（線條）：右上是圓形的頭，握把往左下斜、越來越細（只畫一條線的話很像放大鏡）
-        static FrameworkElement MicIcon(double s)
-        {
-            double size = Math.Round(18 * s), stroke = Math.Max(1, 1.4 * s);
-            var canvas = new Canvas { Width = size, Height = size, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-            double r = 3.8 * s, cx = size - r - 1.4 * s, cy = r + 1.4 * s;
-            var head = new System.Windows.Shapes.Ellipse { Width = r * 2, Height = r * 2, Stroke = Brushes.White, StrokeThickness = stroke };
-            Canvas.SetLeft(head, cx - r); Canvas.SetTop(head, cy - r);
-            canvas.Children.Add(head);
-
-            // 握把的中線往左下（u），寬度方向跟它垂直（n）；靠近頭的那端寬、尾端窄，頭蓋住的那條邊不畫
-            double k = Math.Sqrt(0.5), ux = -k, uy = k, nx = k, ny = k;
-            double sx = cx + ux * r * 0.8, sy = cy + uy * r * 0.8;      // 握把起點（在頭的圓圈上）
-            double length = 9.5 * s, w1 = 2.2 * s, w2 = 1.2 * s;        // 長度、起點半寬、尾端半寬
-            double ex = sx + ux * length, ey = sy + uy * length;
-            var body = new System.Windows.Shapes.Polyline
-            {
-                Points = new PointCollection
-                {
-                    new Point(sx + nx * w1, sy + ny * w1), new Point(ex + nx * w2, ey + ny * w2),
-                    new Point(ex - nx * w2, ey - ny * w2), new Point(sx - nx * w1, sy - ny * w1),
-                },
-                Stroke = Brushes.White, StrokeThickness = stroke, StrokeLineJoin = PenLineJoin.Round,
-            };
-            canvas.Children.Add(body);
-            return canvas;
-        }
-
-        // 音量：左邊喇叭（按了靜音 / 取消靜音；停 0.5 秒展開滑桿），右邊滑桿（點或拖曳調整）
-        internal class VolumeControl
-        {
-            public Canvas Panel;
-            public List<UIElement> IconParts = new List<UIElement>(), BarParts = new List<UIElement>();   // 喇叭、滑桿各畫成一張
-            public double TrackLeft, TrackWidth;   // 滑桿在 Panel 裡的左端和長度
-            public TextBlock Icon;
-            public Border Fill;
-            public FrameworkElement Knob;
-            public double KnobRadius;
-
-            public void Show(double volume)
-            {
-                volume = Math.Max(0, Math.Min(1, volume));
-                // 靜音是喇叭打叉，其他依音量大小顯示一到三道聲波
-                Icon.Text = volume <= 0 ? "" : volume < 0.34 ? "" : volume < 0.67 ? "" : "";
-                Fill.Width = TrackWidth * volume;
-                Canvas.SetLeft(Knob, TrackLeft + TrackWidth * volume - KnobRadius);
-            }
-        }
-
-        static VolumeControl BuildVolume(double s, double buttonSize, double width, List<KeyValuePair<FrameworkElement, string>> controls)
-        {
-            var v = new VolumeControl { Panel = new Canvas { Width = width, Height = buttonSize }, KnobRadius = Math.Round(5 * s) };
-
-            // 喇叭：跟播放按鈕一樣大，圖示的間距也跟它們一樣
-            v.Icon = new TextBlock { FontFamily = IconFont, FontSize = 15 * s, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-            var mute = new Border { Width = buttonSize, Height = buttonSize, Background = Brushes.Transparent, Child = v.Icon };
-            v.Panel.Children.Add(mute);
-            v.IconParts.Add(mute);
-            controls.Add(new KeyValuePair<FrameworkElement, string>(mute, "mute"));
-
-            // 滑桿：從喇叭圖示右邊一點，到歌詞按鈕的麥克風前面（把手拉到最右邊也不會碰到麥克風）
-            double inset = (buttonSize - 15 * s) / 2, gap = Math.Round(7 * s);
-            double micLeft = width + (buttonSize - Math.Round(18 * s)) / 2;
-            v.TrackLeft = buttonSize - inset + gap;
-            v.TrackWidth = micLeft - gap - v.KnobRadius - v.TrackLeft;
-            double thickness = Math.Max(2, Math.Round(4 * s)), top = (buttonSize - thickness) / 2;
-            var track = new Border { Width = v.TrackWidth, Height = thickness, CornerRadius = new CornerRadius(thickness / 2), Background = new SolidColorBrush(Color.FromArgb(0x4D, 255, 255, 255)) };
-            v.Fill = new Border { Height = thickness, CornerRadius = new CornerRadius(thickness / 2), Background = Brushes.White };
-            v.Knob = new System.Windows.Shapes.Ellipse { Width = v.KnobRadius * 2, Height = v.KnobRadius * 2, Fill = Brushes.White };
-            Canvas.SetLeft(track, v.TrackLeft); Canvas.SetTop(track, top);
-            Canvas.SetLeft(v.Fill, v.TrackLeft); Canvas.SetTop(v.Fill, top);
-            Canvas.SetTop(v.Knob, buttonSize / 2 - v.KnobRadius);
-            v.Panel.Children.Add(track);
-            v.Panel.Children.Add(v.Fill);
-            v.Panel.Children.Add(v.Knob);
-
-            // 點或拖曳的範圍：喇叭右邊到歌詞按鈕前面，整排按鈕的高度（比滑桿本身好點）
-            var hit = new Border { Width = width - buttonSize, Height = buttonSize, Background = Brushes.Transparent };
-            Canvas.SetLeft(hit, buttonSize);
-            v.Panel.Children.Add(hit);
-            v.BarParts.AddRange(new UIElement[] { track, v.Fill, v.Knob, hit });
-            controls.Add(new KeyValuePair<FrameworkElement, string>(hit, "volume"));
-            v.Show(0);
-            return v;
-        }
-
-        static Border AddControl(Panel panel, string glyph, string action, double s, double size, List<KeyValuePair<FrameworkElement, string>> controls)
-        {
-            var button = new Border
-            {
-                Width = size, Height = size, Background = Brushes.Transparent,
-                Child = new TextBlock { Text = glyph, FontFamily = IconFont, FontSize = 15 * s, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center },
-            };
-            panel.Children.Add(button);
-            controls.Add(new KeyValuePair<FrameworkElement, string>(button, action));
-            return button;
         }
     }
 }

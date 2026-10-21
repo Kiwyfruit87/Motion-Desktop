@@ -11,7 +11,7 @@ using WinForms = System.Windows.Forms;
 
 namespace VideoWallpaper
 {
-    class WallpaperApp
+    partial class WallpaperApp
     {
         readonly Settings settings;
         readonly List<ScreenPlayer> players = new List<ScreenPlayer>();
@@ -44,6 +44,7 @@ namespace VideoWallpaper
 
             // 鎖定畫面：開著的時候影片要播（就算桌布被視窗蓋住）
             lockScreen.ActiveChanged = delegate { UpdateCoverage(); ApplyPlayState(); };
+            lockScreen.BeatGlow = settings.BeatGlow;
             Weather.SetFixedLocation(settings.WeatherLocation);
             Weather.Refresh(null);   // 先把天氣查好，打開鎖定畫面時就有
 
@@ -110,16 +111,23 @@ namespace VideoWallpaper
                     if (!HasVideo) panel.Show();
                 }));
             // 有設定影片、只是暫時找不到（例如開機時放影片的磁碟還沒準備好）：不跳視窗，每秒檢查，找到就開始播
+
+            InitExtras();   // 其他檔案加的功能（沒有就不做事）
         }
+
+        // 其他檔案可以接在這裡（沒有實作就什麼都不做）
+        partial void InitExtras();
 
         // ---------- 給面板用的狀態與操作 ----------
 
         public bool HasVideo { get { return !string.IsNullOrEmpty(settings.VideoPath) && File.Exists(settings.VideoPath); } }
         public string VideoPath { get { return settings.VideoPath; } }
+        public bool IsImage { get { return ImageLayer.IsImage(settings.VideoPath); } }   // 桌布是圖片（沒有播放、靜音；只看副檔名，不碰檔案）
         public bool UserPaused { get { return userPaused; } }
         public bool Muted { get { return settings.Muted; } }
         public bool AutoPause { get { return settings.AutoPause; } }
         public bool TaskbarFixEnabled { get { return settings.TaskbarFix; } }
+        public bool BeatGlow { get { return settings.BeatGlow; } }
         public Stretch Stretch { get { return settings.Stretch; } }
         public string LastError { get { return lastError; } }
         public bool AutoPaused { get { return settings.AutoPause && players.Exists(p => p.Covered); } }
@@ -132,7 +140,7 @@ namespace VideoWallpaper
         {
             if (engine == null)
             {
-                tray.ShowBalloonTip(5000, Lang.AppName, Lang.T("要先選一段影片，才能開啟鎖定畫面。", "Choose a video first to open the lock screen."), WinForms.ToolTipIcon.Info);
+                tray.ShowBalloonTip(5000, Lang.AppName, Lang.T("要先選一段影片或一張圖片，才能開啟鎖定畫面。", "Choose a video or an image first to open the lock screen."), WinForms.ToolTipIcon.Info);
                 return;
             }
             lockScreen.Open(engine);
@@ -184,6 +192,14 @@ namespace VideoWallpaper
             panel.Refresh();
         }
 
+        public void SetBeatGlow(bool enable)
+        {
+            settings.BeatGlow = enable;
+            settings.Save();
+            lockScreen.BeatGlow = enable;
+            panel.Refresh();
+        }
+
         // 鎖定、睡眠、螢幕關閉、或鎖定畫面開著（蓋住工作列）時不用檢查
         void CheckTaskbar()
         {
@@ -199,8 +215,12 @@ namespace VideoWallpaper
             {
                 using (var dlg = new WinForms.OpenFileDialog())
                 {
-                    dlg.Title = Lang.T("選擇要當桌布的影片", "Choose a video for your wallpaper");
-                    dlg.Filter = Lang.T("影片檔", "Video files") + " (*.mp4;*.wmv;*.mov;*.m4v;*.avi;*.mkv;*.webm)|*.mp4;*.wmv;*.mov;*.m4v;*.avi;*.mkv;*.webm|"
+                    dlg.Title = Lang.T("選擇要當桌布的影片或圖片", "Choose a video or an image for your wallpaper");
+                    const string videos = "*.mp4;*.wmv;*.mov;*.m4v;*.avi;*.mkv;*.webm";
+                    string images = ImageLayer.Patterns;
+                    dlg.Filter = Lang.T("影片和圖片", "Videos and images") + " (" + videos + ";" + images + ")|" + videos + ";" + images + "|"
+                        + Lang.T("影片", "Videos") + " (" + videos + ")|" + videos + "|"
+                        + Lang.T("圖片", "Images") + " (" + images + ")|" + images + "|"
                         + Lang.T("所有檔案", "All files") + " (*.*)|*.*";
                     dlg.InitialDirectory = HasVideo
                         ? Path.GetDirectoryName(settings.VideoPath)
@@ -231,7 +251,7 @@ namespace VideoWallpaper
 
         void RefreshTray()
         {
-            string tip = Lang.AppName + " - " + (HasVideo ? Path.GetFileName(settings.VideoPath) : Lang.T("尚未選擇影片", "No video selected"));
+            string tip = Lang.AppName + " - " + (HasVideo ? Path.GetFileName(settings.VideoPath) : Lang.T("尚未選擇影片或圖片", "No video or image selected"));
             if (tip.Length > 63) tip = tip.Substring(0, 60) + "...";   // NotifyIcon.Text 上限 63 字
             tray.Text = tip;
         }

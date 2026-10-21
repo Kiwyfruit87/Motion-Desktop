@@ -55,6 +55,42 @@ namespace VideoWallpaper
 
         public void PopClip() { popClip(target); }
 
+        // ---------- 變形、純色（液態玻璃卡片上的東西）----------
+        [StructLayout(LayoutKind.Sequential)] struct ColorF { public float R, G, B, A; }
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int CreateSolidBrushFn(IntPtr self, ref ColorF color, ref BrushProperties props, out IntPtr brush);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void SetColorFn(IntPtr self, ref ColorF color);
+        SetTransformFn targetTransform;
+        IntPtr solid;
+        SetColorFn setColor;
+        FillRoundedRectangleFn fillSolidRounded;   // 跟 Fill 的分開記：那邊第一次用到時順便記點陣圖筆刷的函式
+
+        // 接下來畫的東西整個縮放 (sx, sy) 再移動 (dx, dy)（鎖定畫面滑動時卡片的慣性）；1, 1, 0, 0 是不變形
+        public void SetTransform(double sx, double sy, double dx, double dy)
+        {
+            if (targetTransform == null) targetTransform = ComVtable.Method<SetTransformFn>(target, 30);   // ID2D1RenderTarget::SetTransform
+            var m = new Matrix { M11 = (float)sx, M22 = (float)sy, Dx = (float)dx, Dy = (float)dy };
+            targetTransform(target, ref m);
+        }
+
+        // 用純色（r, g, b 0～1，不透明度 a）填滿圓角長方形 (x, y, w, h)
+        public void FillSolid(double x, double y, double w, double h, double radius, double r, double g, double b, double a)
+        {
+            if (solid == IntPtr.Zero)
+            {
+                var white = new ColorF { R = 1, G = 1, B = 1, A = 1 };
+                var props = new BrushProperties { Opacity = 1, Transform = new Matrix { M11 = 1, M22 = 1 } };
+                IntPtr brushHandle;
+                if (ComVtable.Method<CreateSolidBrushFn>(target, 8)(target, ref white, ref props, out brushHandle) < 0) return;   // ID2D1RenderTarget::CreateSolidColorBrush
+                solid = brushHandle;
+                setColor = ComVtable.Method<SetColorFn>(solid, 8);                              // ID2D1SolidColorBrush::SetColor
+                fillSolidRounded = ComVtable.Method<FillRoundedRectangleFn>(target, 19);       // ID2D1RenderTarget::FillRoundedRectangle
+            }
+            var color = new ColorF { R = (float)r, G = (float)g, B = (float)b, A = (float)a };
+            setColor(solid, ref color);
+            var rect = new RoundedRect { Rect = new RectF { Left = (float)x, Top = (float)y, Right = (float)(x + w), Bottom = (float)(y + h) }, RadiusX = (float)radius, RadiusY = (float)radius };
+            fillSolidRounded(target, ref rect, solid);
+        }
+
         readonly IntPtr target;
         readonly CreateBitmapFn createBitmap;
         readonly DrawBitmapFn drawBitmap;
@@ -136,7 +172,7 @@ namespace VideoWallpaper
             Fill(brush, new Matrix { M11 = blurW / (float)up.W, M22 = blurH / (float)up.H, Dx = blurX, Dy = blurY }, opacity, x, y, w, h, radius);
         }
 
-        // ---------- 慢慢飄動的漸層（音樂卡片的顏色）----------
+        // ---------- 點陣圖筆刷（毛玻璃用）----------
         CreateBitmapBrushFn createBrush;
 
         // 用 bitmap 做一支筆刷（之後用它填滿圓角長方形，位置可以隨時移動）；失敗回傳 0
@@ -147,12 +183,6 @@ namespace VideoWallpaper
             var common = new BrushProperties { Opacity = 1, Transform = new Matrix { M11 = 1, M22 = 1 } };
             IntPtr result;
             return createBrush(target, bitmap, ref props, ref common, out result) < 0 ? IntPtr.Zero : result;
-        }
-
-        // 用筆刷填滿圓角長方形 (x, y, w, h)；筆刷的圖左上角放在 (left, top)（可以有小數，移動才平順）
-        public void FillRounded(IntPtr brushHandle, double left, double top, double x, double y, double w, double h, double radius, double opacity)
-        {
-            Fill(brushHandle, new Matrix { M11 = 1, M22 = 1, Dx = (float)left, Dy = (float)top }, opacity, x, y, w, h, radius);
         }
 
         SetTransformFn brushTransform;
@@ -285,20 +315,12 @@ namespace VideoWallpaper
             drawBitmap(target, bitmap, ref dest, (float)opacity, 1 /* 線性 */, ref source);
         }
 
-        // 關掉邊緣反鋸齒（拼接好幾塊時，接縫的地方才不會兩邊都只畫一半、變成一條淡淡的縫）
-        [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void SetAntialiasModeFn(IntPtr self, int mode);
-        SetAntialiasModeFn setAntialias;
-        public void SetAliased(bool aliased)
-        {
-            if (setAntialias == null) setAntialias = ComVtable.Method<SetAntialiasModeFn>(target, 32);   // ID2D1RenderTarget::SetAntialiasMode
-            setAntialias(target, aliased ? 1 /* 不反鋸齒 */ : 0 /* 預設 */);
-        }
-
         public int End() { ulong tag1, tag2; return endDraw(target, out tag1, out tag2); }
 
         public void Release()
         {
             ReleaseBlurResources();
+            if (solid != IntPtr.Zero) { Marshal.Release(solid); solid = IntPtr.Zero; }
             Marshal.Release(target);
         }
     }
