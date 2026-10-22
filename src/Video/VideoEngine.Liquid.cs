@@ -130,9 +130,9 @@ namespace VideoWallpaper
         bool liquidTried;
         int featureLevel;
         // 兩層玻璃的質感（每一格重複用，不另外配置）。卡片：清透、邊緣把外面的東西壓進來；亮邊跟控制面板一樣（Spec 0.85、Inner 6，預設值）
-        // 邊緣折射：強度 1.8、折射帶 40（圓角最外緣位移約 1.8 × 0.5 × 40 × 1.5 ≈ 54；上下直邊再打折，見卡片的 Focus）；
-        // 中央稍微霧一點（模糊 0.44、白霧 0.13），背景的字不會干擾卡片上的字，但還看得出是透明的玻璃
-        readonly LiquidGlass.Look cardLook = new LiquidGlass.Look { Scatter = 0.44f, TintAmt = 0.13f, Legible = 0.4f, Bevel = 40, Refract = 1.8f, CA = 0.022f };
+        // 邊緣折射：強度 3.0、折射帶 40（圓角最外緣位移約 3.0 × 0.5 × 40 × 1.5 = 90：扭曲的範圍不變，邊緣壓得更緊、更明顯；上下直邊再打折，見卡片的 Focus）；
+        // 中央淡淡的霧（模糊 0.36、白霧 0.10），背景的字不會干擾卡片上的字，但還看得出是透明的玻璃
+        readonly LiquidGlass.Look cardLook = new LiquidGlass.Look { Scatter = 0.36f, TintAmt = 0.10f, Legible = 0.4f, Bevel = 40, Refract = 3.0f, CA = 0.022f };
         readonly LiquidGlass.Look topLook = LiquidGlass.Look.OnTop(1);
 
         // ---------- 給 UI 執行緒用的指令 ----------
@@ -293,13 +293,14 @@ namespace VideoWallpaper
             var card = new LiquidGlass.Shape
             {
                 X = (float)cx, Y = (float)cy, HalfW = (float)(spec.W / 2), HalfH = (float)(spec.H / 2), Radius = (float)spec.Radius,
-                Appear = 1, Thick = (float)Math.Max(0.6, Math.Min(1.5, Math.Min(spec.W, spec.H) / 2 / (40 * s))),
+                Appear = 1, Thick = (float)Math.Max(0.6, Math.Min(1.5, Math.Min(spec.W, spec.H) / 2 / (cardLook.Bevel * s))),
                 TintR = (float)spec.TintR, TintG = (float)spec.TintG, TintB = (float)spec.TintB, TintA = 0.14f,   // 淡淡的封面色
                 Mag = 1.08f, Shadow = 0.2f, D00 = (float)(1 / sx), D11 = (float)(1 / sy),   // 中央只稍微放大，透過去的背景比較穩
                 Focus = 0.45f,   // 上下兩條直邊的折射只剩 55%（背景的字不會被拉長）；左右邊、圓角全強度
             };
             // 模糊的範圍：卡片原本的位置加上四周（卡片的慣性移動也還在範圍裡）；要畫的範圍：卡片現在的位置加上影子
-            int margin = (int)Math.Ceiling(60 * s), slack = (int)Math.Ceiling(40 * s);
+            // 四周 96：邊緣最多往外取樣 90 × 1.022（色差）− 中央放大內縮約 15 ≈ 77，再留模糊的寬度
+            int margin = (int)Math.Ceiling(96 * s), slack = (int)Math.Ceiling(40 * s);
             int bx, by, bw, bh, ex, ey, ew, eh;
             Clip(t, spec.X - margin, spec.Y - margin - slack, spec.W + 2 * margin, spec.H + 2 * (margin + slack), out bx, out by, out bw, out bh);
             double hw = spec.W / 2 * sx, hh = spec.H / 2 * sy, pad = 52 * s;
