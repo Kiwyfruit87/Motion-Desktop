@@ -101,7 +101,7 @@ Turning the option off removes it. Only if creating the task fails does it fall 
   - When no lyrics are found, or for instrumentals and podcasts, the button is dimmed and does nothing.
   - Time-synced lyrics follow the singing precisely. Plain lyrics (without timestamps) scroll evenly over the song's length without highlighting a line.
 - **Shuffle** and **repeat** (off → all → one) work with players that support them; they are dimmed for players that don't.
-- The mouse cursor only appears when you move the mouse and hides after 2.5 seconds.
+- The mouse cursor only appears when you move the mouse and hides after 2.5 seconds (it stays visible while it's over the music card).
 - The clock font is Google Sans Flex and the music card uses Inter (both in the `fonts` folder under the SIL Open Font License, see `fonts\OFL.txt` and `fonts\Inter-OFL.txt`).
 - Weather: the rough location is found from your IP address with ipapi.co (fallback: ipwho.is), then the weather comes from Open-Meteo, updated at most every 20 minutes.
   To set a location instead of using your IP, add a line `weatherlocation=latitude,longitude` to `settings.ini` (for example `weatherlocation=22.99,120.21`).
@@ -247,7 +247,7 @@ A picture is drawn once by the graphics card and only redrawn when something cha
   - 查不到歌詞、純音樂、Podcast 時，按鈕會變暗，按了也沒反應。
   - 有時間標記的歌詞會準確跟著唱；只有一般歌詞（沒有時間標記）的話，照歌曲長度平均慢慢捲，不會特別強調哪一行。
 - **隨機播放**和**循環**（關 → 全部 → 單曲）：播放器支援就能用，不支援的會變淡。
-- 移動滑鼠時才會出現游標，停 2.5 秒自動隱藏。
+- 移動滑鼠時才會出現游標，停 2.5 秒自動隱藏（停在音樂卡片上時不會隱藏）。
 - 時鐘字體是 Google Sans Flex，音樂卡片用 Inter（都放在 `fonts` 資料夾，SIL Open Font License，授權條款見 `fonts\OFL.txt`、`fonts\Inter-OFL.txt`）。
 - 天氣：先用 ipapi.co（備用 ipwho.is）依網路 IP 查大概位置，再向 Open-Meteo 查天氣，每 20 分鐘最多更新一次。
   想指定位置、不用 IP 判斷的話，在 `settings.ini` 加一行 `weatherlocation=緯度,經度`（例如 `weatherlocation=22.99,120.21`）。

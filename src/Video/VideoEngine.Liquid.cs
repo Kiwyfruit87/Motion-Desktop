@@ -61,8 +61,8 @@ namespace VideoWallpaper
 
             public bool Sliding(long now) { return Ms > 0 && now - Start < Ms; }
 
-            // 往前推到 now：頁面加速時卡片落後一點、減速時往前衝一點再彈回（彈簧 response 0.13、阻尼比 0.7，只受頁面的加速度推）；
-            // 卡片移動得越快沿方向拉長越多（最多 4%，彈簧 0.5 / 0.52，停下時會稍微變扁再恢復）
+            // 往前推到 now：頁面加速時卡片落後一點、減速時往前衝一點再彈回（彈簧 response 0.17、阻尼比 0.5，只受頁面的加速度推；
+            // 1080p 上最多偏離約 85 像素，停下時多彈兩下）；卡片移動得越快沿方向拉長越多（最多 6%，彈簧 0.5 / 0.52，停下時會稍微變扁再恢復）
             public bool Step(long now)
             {
                 double dt = LastTick == 0 ? 0 : Math.Min(1 / 30.0, (now - LastTick) / 1000.0);
@@ -76,12 +76,12 @@ namespace VideoWallpaper
                     pv = (y2 - y0) / (2 * h) * 1000;
                     pa = (y2 - 2 * y1 + y0) / (h * h) * 1e6;
                 }
-                double w = 2 * Math.PI / 0.13;
+                double w = 2 * Math.PI / 0.17;
                 int n = Math.Max(1, (int)Math.Ceiling(dt * 240));
                 double step = dt / n;
-                for (int i = 0; i < n; i++) { DV += (-pa - w * w * D - 2 * 0.7 * w * DV) * step; D += DV * step; }
+                for (int i = 0; i < n; i++) { DV += (-pa - w * w * D - 2 * 0.5 * w * DV) * step; D += DV * step; }
                 double speed = Math.Abs(pv + DV);
-                Stretch.Step(0.04 * Math.Tanh(speed / (900 * Scale)), 0.5, 0.52, dt);
+                Stretch.Step(0.06 * Math.Tanh(speed / (900 * Scale)), 0.5, 0.52, dt);
                 return Running(now);
             }
 
@@ -300,7 +300,7 @@ namespace VideoWallpaper
             };
             // 模糊的範圍：卡片原本的位置加上四周（卡片的慣性移動也還在範圍裡）；要畫的範圍：卡片現在的位置加上影子
             // 四周 96：邊緣最多往外取樣 90 × 1.022（色差）− 中央放大內縮約 15 ≈ 77，再留模糊的寬度
-            int margin = (int)Math.Ceiling(96 * s), slack = (int)Math.Ceiling(40 * s);
+            int margin = (int)Math.Ceiling(96 * s), slack = (int)Math.Ceiling(90 * s);   // 上下多留 90：卡片慣性晃動最多約 85
             int bx, by, bw, bh, ex, ey, ew, eh;
             Clip(t, spec.X - margin, spec.Y - margin - slack, spec.W + 2 * margin, spec.H + 2 * (margin + slack), out bx, out by, out bw, out bh);
             double hw = spec.W / 2 * sx, hh = spec.H / 2 * sy, pad = 52 * s;

@@ -94,7 +94,7 @@ float4 Blur(float4 pos : SV_Position) : SV_Target   // 9 點高斯（一個方�
     return float4(c, 1.0);
 }
 
-struct Hit { float d; float2 c; float appear, style, thick, mag, shadow, energy, focus, flat; float4 tint, fill; };
+struct Hit { float d; float2 c; float appear, style, thick, mag, shadow, energy, focus, flat, corn; float4 tint, fill; };
 
 float SdBox(float2 p, float2 b, float r)
 {
@@ -103,9 +103,10 @@ float SdBox(float2 p, float2 b, float r)
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
 }
 
-// 這一點的折射要打折多少（0～1）：只有靠上下兩條直邊的地方打折（背景的字是橫的，上下邊緣最容易被拉長）；
+// x：這一點的折射要打折多少（0～1）：只有靠上下兩條直邊的地方打折（背景的字是橫的，上下邊緣最容易被拉長）；
 // 靠左右邊、圓角裡保持全強度。用玻璃自己的座標判斷：離上下邊比離左右邊近就算「上下」，沿著 45° 那條線平順過渡（不會有折痕）
-float FlatOf(int i, float2 p)
+// y：在圓角裡多深（0～1）。圓角外面一大片要壓進一小段弧裡（往外、沿著弧兩個方向都被壓縮），背景會被擠成雜亂的小點
+float2 FlatOf(int i, float2 p)
 {
     float2 q = p - Shape[i].xy;
     float4 m = Def[i];
@@ -116,7 +117,7 @@ float FlatOf(int i, float2 p)
     float corner = smoothstep(0.0, max(0.3 * r, 1e-3), min(over.x, over.y));   // 圓角裡（平順地接到直邊）
     float2 gap = b - abs(q);                                              // 離左右邊、上下邊多遠
     float k = 14.0 * A.y;
-    return smoothstep(-k, k, gap.x - gap.y) * (1.0 - corner);
+    return float2(smoothstep(-k, k, gap.x - gap.y) * (1.0 - corner), corner);
 }
 
 float ShapeD(int i, float2 p)
@@ -132,7 +133,7 @@ float ShapeD(int i, float2 p)
 Hit Scene(float2 p)   // 每塊玻璃平滑地黏在一起，屬性跟著混合
 {
     Hit h;
-    h.d = 1e5; h.c = float2(0.0, 0.0); h.appear = 0.0; h.style = 0.0; h.thick = 1.0; h.mag = 1.0; h.shadow = 0.0; h.energy = 0.0; h.focus = 0.0; h.flat = 0.0;
+    h.d = 1e5; h.c = float2(0.0, 0.0); h.appear = 0.0; h.style = 0.0; h.thick = 1.0; h.mag = 1.0; h.shadow = 0.0; h.energy = 0.0; h.focus = 0.0; h.flat = 0.0; h.corn = 0.0;
     h.tint = float4(0.0, 0.0, 0.0, 0.0); h.fill = float4(0.0, 0.0, 0.0, 0.0);
     float k = max(C.w * A.y, 1e-3);
     int n = (int)A.x;
@@ -145,7 +146,8 @@ Hit Scene(float2 p)   // 每塊玻璃平滑地黏在一起，屬性跟著混合
         h.c = lerp(h.c, Shape[i].xy, w);
         h.appear = lerp(h.appear, Param[i].y, w); h.style = lerp(h.style, Param[i].z, w); h.thick = lerp(h.thick, Param[i].w, w);
         h.mag = lerp(h.mag, Extra[i].x, w); h.shadow = lerp(h.shadow, Extra[i].y, w); h.energy = lerp(h.energy, Extra[i].z, w); h.focus = lerp(h.focus, Extra[i].w, w);
-        h.flat = lerp(h.flat, Extra[i].w > 0.0 ? FlatOf(i, p) : 0.0, w);   // 不用打折的（Focus 0）不用算
+        float2 fc = Extra[i].w > 0.0 ? FlatOf(i, p) : float2(0.0, 0.0);   // 不用打折的（Focus 0）不用算
+        h.flat = lerp(h.flat, fc.x, w); h.corn = lerp(h.corn, fc.y, w);
         h.tint = lerp(h.tint, Tint[i], w); h.fill = lerp(h.fill, Fill[i], w);
     }
     return h;
@@ -209,15 +211,16 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
     float edge = 1.0 - x;
     float disp = A.z * 0.5 * bev * exp(-u / (0.35 * bev));
     // 上下兩條直邊的折射打折（背景的字不會被拉長）；左右邊、圓角保持全強度
-    disp *= 1.0 - h.focus * h.flat;
+    disp *= 1.0 - h.focus * (h.flat + 0.5 * h.corn);   // 圓角也稍微收一點（壓縮最嚴重的地方）
     float2 off = n * disp * a;
 
     float2 base = h.c + (p - h.c) / lerp(1.0, h.mag, a);   // 整塊放大
-    float ca = B.x * edge;
+    float ca = B.x * edge * (1.0 - 0.7 * h.corn);   // 圓角裡色差少一點（壓得很緊時色差會變成彩色雜點）
     // 越靠邊緣越清楚：邊緣折射進來的是看得出形狀的背景（液態玻璃最明顯的特徵），中間才是模糊的；
     // 跟位移用同一種衰減（位移大的地方才清楚），但至少留一點輕模糊（邊緣壓縮了好幾倍，完全不糊的話影片的細節會閃）
     float sc = saturate(B.y * lerp(0.8, 1.25, saturate(h.thick - 0.6))) * a * (1.0 - 0.75 * exp(-u / (0.5 * bev)));
     sc = max(sc, 0.1 * a * step(0.001, B.y));
+    sc = max(sc, 0.3 * h.corn * edge * a);   // 圓角靠邊的地方糊一點：壓縮好幾十倍的背景不清楚反而好看，不會一閃一閃
     float3 col = float3(Look(base + off * (1.0 + ca), sc).r, Look(base + off, sc).g, Look(base + off * (1.0 - ca), sc).b);
 
     col *= 1.0 - D.w * a;

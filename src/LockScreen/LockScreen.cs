@@ -124,8 +124,8 @@ namespace VideoWallpaper
             {
                 Refresh(false);
                 Weather.Refresh(delegate { if (Active) Refresh(true); });
-                // 滑鼠停 2.5 秒就把游標藏起來
-                if (LockWindow.CursorShown && (DateTime.Now - LockWindow.LastMove).TotalSeconds > 2.5)
+                // 滑鼠停 2.5 秒就把游標藏起來（停在音樂卡片上時不藏：可能正要按按鈕）
+                if (LockWindow.CursorShown && (DateTime.Now - LockWindow.LastMove).TotalSeconds > 2.5 && !CursorOnCard())
                 {
                     LockWindow.CursorShown = false;
                     Native.SetCursor(IntPtr.Zero);
@@ -370,6 +370,16 @@ namespace VideoWallpaper
         {
             foreach (var b in buttons) if (b.Value == action && b.Key.Contains(x, y)) return true;
             return false;
+        }
+
+        // 游標在音樂卡片上嗎（卡片的位置以主螢幕視窗的左上角為 0）
+        bool CursorOnCard()
+        {
+            if (card == null || primary == null) return false;
+            Native.POINT p;
+            if (!Native.GetCursorPos(out p)) return false;
+            int x = p.X - primary.Bounds.X, y = p.Y - primary.Bounds.Y;
+            return x >= card.InnerX && x < card.InnerX + card.InnerW && y >= card.InnerY && y < card.InnerY + card.InnerH;
         }
 
         // 點到「正在播放」的按鈕：控制播放器、切換歌詞或拖進度條，鎖定畫面不滑走（變暗的按鈕按了也不會滑走）
