@@ -22,6 +22,7 @@ namespace VideoWallpaper
             public int X, Y, W, H;
             public int Z;                         // 疊的順序（見 OverlayLayer）
             public int Follow;                    // 鎖定畫面滑動時跟著卡片動：0 不動（時鐘）、1 跟著移動（卡片上方的歌詞）、2 跟著移動和變形（卡片本身）
+            public bool ClockDigits;              // 時鐘的實心數字：這一格畫出了玻璃數字就不畫（名字是 "clockDigits"）
             public Tween Fade = new Tween(1);     // 整張圖的不透明度（淡入淡出）
             public bool RemoveWhenFaded;          // 動畫做完就拿掉（淡出、滑出）
             // 捲動的疊圖（歌詞）：整張長圖只露出 ViewH 高的一段（從第 Scroll 列開始），Mask 是露出那段每一列的亮度（0～1）
@@ -306,6 +307,7 @@ namespace VideoWallpaper
                 if (o.Running(now)) animating = true;   // 光暈要不要重畫由引擎看亮度變了多少決定（見 PulseLevel）
                 if (!canvas.HasImage(o)) continue;
                 if (o.Glass && t.LiquidActive) continue;   // 液態玻璃取代原本的毛玻璃（底和邊框都不畫）
+                if (o.ClockDigits && t.ClockGlassOn) continue;   // 玻璃數字取代實心數字
                 double fade = o.Fade.Value(now);
                 if (fade <= 0.004) continue;
                 Follow(t, canvas, o.Follow, ref follow);

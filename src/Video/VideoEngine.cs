@@ -60,6 +60,20 @@ namespace VideoWallpaper
             public IntPtr LiquidRtv, LiquidScene;
             public int LiquidBlurX, LiquidBlurY, LiquidBlurW, LiquidBlurH;
             public long LiquidBlurredAt = -100000;
+            // 左下角時鐘的玻璃數字（見 VideoEngine.Liquid.cs）：字形距離圖和它在畫面上的位置、放上顯示卡的那份、這一格有沒有畫出玻璃
+            public float[] ClockField;
+            public int ClockX, ClockY, ClockW, ClockH;
+            public double ClockScale;
+            public IntPtr ClockTexture, ClockView;
+            // 換分鐘的動畫：舊時間的距離圖（還在畫離開的字）和它的位置、每個字的動作（見 SetClock）、開始的時間、數字的位置
+            public IntPtr ClockOldTexture, ClockOldView;
+            public int ClockOldX, ClockOldY, ClockOldW, ClockOldH;
+            public float[] ClockSlots;
+            public long ClockAnimStart;
+            public float ClockTimeTop, ClockDigitY, ClockDigitH;
+            public bool ClockGlassOn, ClockFieldFailed;
+            public int ClockBlurX, ClockBlurY, ClockBlurW, ClockBlurH;
+            public long ClockBlurredAt = -100000;
 
             // 疊圖：名字 → 圖。照疊的順序排好的清單只在增減時重排（每一格都要照順序畫，不要每次都排序）
             readonly Dictionary<string, Overlay> overlays = new Dictionary<string, Overlay>();
@@ -69,6 +83,7 @@ namespace VideoWallpaper
             public void Put(string name, Overlay o)
             {
                 o.Follow = name.StartsWith("music", StringComparison.Ordinal) ? 2 : name.StartsWith("lyrics", StringComparison.Ordinal) ? 1 : 0;
+                o.ClockDigits = name == "clockDigits";
                 overlays[name] = o;
                 ordered = null;
             }
@@ -549,6 +564,7 @@ namespace VideoWallpaper
                     if (DrawLiquidBase(t, AnimationClock.Now)) redraw = true;   // 卡片的液態玻璃（在影片上、疊圖底下）；卡片還在動就再畫下一格
                 }
                 else t.LiquidActive = false;
+                if (DrawClockGlass(t, AnimationClock.Now)) redraw = true;   // 時鐘的玻璃數字（也在疊圖底下）；換分鐘的動畫中就再畫下一格
                 if (DrawOverlay(t)) redraw = true;   // 歌詞捲動、淡入淡出中：下一次螢幕更新再畫一次
                 hr = t.SwapChain.Present(0, 0);
                 if (hr < 0) { Lost(Lang.T("輸出畫面失敗 0x", "Presenting the frame failed 0x") + hr.ToString("X8")); return; }
@@ -635,6 +651,7 @@ namespace VideoWallpaper
                 targets.Clear();
                 if (image != null) { image.Release(); image = null; }
                 if (liquid != null) { liquid.Release(); liquid = null; }
+                if (clockLiquid != null) { clockLiquid.Release(); clockLiquid = null; }
                 if (output != null) Marshal.ReleaseComObject(output);
                 if (d2dFactory != IntPtr.Zero) { Marshal.Release(d2dFactory); d2dFactory = IntPtr.Zero; }
                 if (factory != null) Marshal.ReleaseComObject(factory);

@@ -128,12 +128,17 @@ namespace VideoWallpaper
 
         LiquidGlass liquid;      // 液態玻璃的著色器（建立失敗是 null，卡片退回原本的毛玻璃）
         bool liquidTried;
+        LiquidGlass clockLiquid; // 時鐘數字的玻璃（自己一份模糊圖：跟卡片不在同一個地方，共用的話每一格都要重新模糊）
+        bool clockTried;
         int featureLevel;
-        // 兩層玻璃的質感（每一格重複用，不另外配置）。卡片：清透、邊緣把外面的東西壓進來；亮邊跟控制面板一樣（Spec 0.85、Inner 6，預設值）
-        // 邊緣折射：強度 3.0、折射帶 40（圓角最外緣位移約 3.0 × 0.5 × 40 × 1.5 = 90：扭曲的範圍不變，邊緣壓得更緊、更明顯；上下直邊再打折，見卡片的 Focus）；
-        // 中央淡淡的霧（模糊 0.36、白霧 0.10），背景的字不會干擾卡片上的字，但還看得出是透明的玻璃
-        readonly LiquidGlass.Look cardLook = new LiquidGlass.Look { Scatter = 0.36f, TintAmt = 0.10f, Legible = 0.4f, Bevel = 40, Refract = 3.0f, CA = 0.022f };
+        // 兩層玻璃的質感（每一格重複用，不另外配置）。卡片：清澈的玻璃（色調照 iOS 26「正在播放」卡片的照片量出來的，見 Look.Clear）：
+        // 背景輕輕糊（0.25）、加 6.7% 的無色白；邊緣的液態折射：強度 3.0、折射帶 40（圓角最外緣位移約 3.0 × 0.5 × 40 × 1.5 = 90；
+        // 上下直邊、圓角打折，見卡片的 Focus）、色散 0.022；細白線和內側提亮的強度 1
+        readonly LiquidGlass.Look cardLook = new LiquidGlass.Look { Clear = 1, Scatter = 0.25f, TintAmt = 0.067f, Refract = 3.0f, Bevel = 40, Spec = 1, CA = 0.022f, Sat = 1, Legible = 0, Reflect = 0 };
         readonly LiquidGlass.Look topLook = LiquidGlass.Look.OnTop(1);
+        // 時鐘的玻璃數字（照 iOS 26 玻璃時鐘的照片量出來的，見 LiquidGlass 的 TextGlass；以下是 1080p 的像素）：
+        // 邊緣往字裡面取樣的鉤 16、衰減 0.9（只在最外緣約 1～3 像素）、色散 0.4；裡面輕輕糊（0.15）、加一層無色的白；輪廓線 1
+        readonly LiquidGlass.Look clockLook = new LiquidGlass.Look { Refract = 16, Bevel = 0.9f, CA = 0.4f, Scatter = 0.15f, Legible = 1, Spec = 1 };
 
         // ---------- 給 UI 執行緒用的指令 ----------
 
@@ -206,11 +211,44 @@ namespace VideoWallpaper
             });
         }
 
+        // 鎖定畫面的時鐘：solid 是實心的字、field 是字形距離圖（兩張一樣大，貼在 (x, y)；scale 以 1080p 為 1）。
+        // 兩樣一起換（換分鐘時不會有一格是新的字配舊的玻璃）。畫得出玻璃時，實心字（clockDigits）就不畫；field 是 null 只用實心字。
+        // slots 不是 null：換分鐘的動畫（見 LockClock.ClockSlots），舊的距離圖留著畫離開的字；timeTop、digitY、digitH 是時間那一行的上緣、數字的中心和高度
+        public void SetClock(IntPtr hwnd, int[] solid, float[] field, int width, int height, int x, int y, double scale,
+            float[] slots, float timeTop, float digitY, float digitH)
+        {
+            WithTarget(hwnd, delegate(Target t, long now)
+            {
+                Replace(t, "clockDigits", solid == null ? null : CreateOverlay(t, solid, width, height, x, y));
+                FreeClockOld(t);
+                if (slots != null && t.ClockView != IntPtr.Zero && field != null)
+                {
+                    // 現在這張變成「舊的」，畫離開的字
+                    t.ClockOldTexture = t.ClockTexture; t.ClockOldView = t.ClockView;
+                    t.ClockTexture = t.ClockView = IntPtr.Zero;
+                    t.ClockOldX = t.ClockX; t.ClockOldY = t.ClockY; t.ClockOldW = t.ClockW; t.ClockOldH = t.ClockH;
+                    t.ClockSlots = slots; t.ClockAnimStart = now;
+                    t.ClockTimeTop = timeTop; t.ClockDigitY = digitY; t.ClockDigitH = digitH;
+                }
+                FreeClockField(t);
+                t.ClockField = field;
+                t.ClockX = x; t.ClockY = y; t.ClockW = width; t.ClockH = height; t.ClockScale = scale;
+                if (field == null) ReleaseLiquidScratch();
+            });
+        }
+
         // ---------- 引擎執行緒 ----------
 
         bool LiquidOn(Target t)
         {
-            if (t.Liquid == null || t.Liquid.Spec == null || t.VideoTexture == IntPtr.Zero || t.D2D == null) return false;
+            if (t.Liquid == null || t.Liquid.Spec == null) return false;
+            return LiquidViews(t);
+        }
+
+        // 液態玻璃的著色器和這個畫面的繪圖目標、影片畫布的讀取介面都準備好了嗎（第一次用到時建立）
+        bool LiquidViews(Target t)
+        {
+            if (t.VideoTexture == IntPtr.Zero || t.D2D == null) return false;
             if (liquid == null && !liquidTried && LiquidGlass.Ready)
             {
                 liquidTried = true;
@@ -220,6 +258,101 @@ namespace VideoWallpaper
             if (t.LiquidRtv == IntPtr.Zero) t.LiquidRtv = liquid.CreateTargetView(t.BackBuffer);
             if (t.LiquidScene == IntPtr.Zero) t.LiquidScene = liquid.CreateReadView(t.VideoTexture);
             return t.LiquidRtv != IntPtr.Zero && t.LiquidScene != IntPtr.Zero;
+        }
+
+        // 時鐘的玻璃數字（影片剛蓋上輸出畫面、還沒貼任何疊圖時畫）。畫不出來（沒有液態玻璃、顯示卡太舊、建不起來）就交給實心數字的疊圖
+        // 回傳換分鐘的動畫還在不在跑（要不要再畫下一格）
+        bool DrawClockGlass(Target t, long now)
+        {
+            t.ClockGlassOn = false;
+            if (t.ClockField == null || !LiquidViews(t)) { FreeClockOld(t); return false; }
+            if (clockLiquid == null && !clockTried)
+            {
+                clockTried = true;
+                clockLiquid = LiquidGlass.Create(device, context, featureLevel);
+            }
+            if (clockLiquid == null) return false;
+            if (t.ClockFieldFailed) return false;   // 這張距離圖放不上顯示卡：等下一分鐘換圖再試，不要每一格都重試
+            if (t.ClockView == IntPtr.Zero && !clockLiquid.CreateField(t.ClockField, t.ClockW, t.ClockH, out t.ClockTexture, out t.ClockView)) { t.ClockFieldFailed = true; return false; }
+            bool animating = ClockAnim(t, now);
+            double s = t.ClockScale;
+            // 模糊的範圍：時鐘那張圖加上四周（邊緣往字裡面取樣最多 16；圖本身四周也留了 30）；要畫的範圍就是那張圖（四周已經留了影子的空間）
+            int margin = (int)Math.Ceiling(56 * s);
+            int bx, by, bw, bh, ex, ey, ew, eh;
+            Clip(t, t.ClockX - margin, t.ClockY - margin, t.ClockW + 2 * margin, t.ClockH + 2 * margin, out bx, out by, out bw, out bh);
+            Clip(t, t.ClockX, t.ClockY, t.ClockW, t.ClockH, out ex, out ey, out ew, out eh);
+            if (bw <= 0 || bh <= 0 || ew <= 0 || eh <= 0) return animating;
+            bool reblur = t.FreshVideo && now - t.ClockBlurredAt >= 33 || bx != t.ClockBlurX || by != t.ClockBlurY || bw != t.ClockBlurW || bh != t.ClockBlurH;
+            if (reblur) { t.ClockBlurredAt = now; t.ClockBlurX = bx; t.ClockBlurY = by; t.ClockBlurW = bw; t.ClockBlurH = bh; }
+            clockLook.Scale = (float)s;
+            t.ClockGlassOn = clockLiquid.DrawText(t.LiquidScene, t.Width, t.Height, t.LiquidRtv, t.ClockView, t.ClockX, t.ClockY, t.ClockW, t.ClockH,
+                animating ? t.ClockOldView : IntPtr.Zero, animating ? clockAnim : null, clockLook, bx, by, bw, bh, ex, ey, ew, eh, reblur);
+            return animating;
+        }
+
+        // 換分鐘的動畫這一格的樣子，填進 clockAnim（排法見 LiquidGlass 的 cbuffer ClockAnim）。照 iPhone（iOS 26 玻璃時鐘）的錄影：
+        //   字本身不變形，一道上下的漸層遮罩（漸層寬半個字高）掃過去——舊字 0.06 秒抹掉（先慢後快），新字晚 0.03 秒開始、
+        //   0.56 秒長滿（先快後慢，p = 1 − (1 − u)^1.5）；換點時慢 1.4 倍；沒變的字整串滑到新位置（指數，τ 0.125 秒）。
+        //   全部跑完回傳 false（舊的距離圖還掉）
+        bool ClockAnim(Target t, long now)
+        {
+            if (t.ClockSlots == null || t.ClockOldView == IntPtr.Zero) return false;
+            double time = (now - t.ClockAnimStart) / 1000.0;
+            const double OldTime = 0.06, NewDelay = 0.03, NewTime = 0.56, SlideTau = 0.125;
+            int n = t.ClockSlots.Length / 8;
+            double end = 0.8;
+            for (int i = 0; i < n; i++) end = Math.Max(end, t.ClockSlots[i * 8 + 5] + (NewDelay + NewTime) * t.ClockSlots[i * 8 + 7] + 0.05);
+            if (time > end) { FreeClockOld(t); return false; }
+            var a = clockAnim;
+            Array.Clear(a, 0, a.Length);
+            double h = t.ClockDigitH, top = t.ClockDigitY - 0.53 * h, bottom = t.ClockDigitY + 0.53 * h, span = bottom - top, w = 0.5 * h;
+            a[0] = n; a[1] = t.ClockTimeTop; a[2] = t.ClockOldX; a[3] = t.ClockOldY;
+            a[4] = t.ClockOldW; a[5] = t.ClockOldH;
+            for (int i = 0; i < n; i++)
+            {
+                int o = i * 8;
+                int kind = (int)t.ClockSlots[o];
+                double s = time - t.ClockSlots[o + 5], slow = t.ClockSlots[o + 7];
+                bool up = t.ClockSlots[o + 6] > 0;
+                double edge = -1e5, side = 1, dx = 0;   // 看得到的是 side × (y − edge) > 0 那一邊，漸層寬 w
+                if (kind == 0) dx = t.ClockSlots[o + 4] * Math.Exp(-Math.Max(0, time) / SlideTau);
+                else if (kind == 1)
+                {
+                    double u = Math.Max(0, Math.Min(1, (s - NewDelay * slow) / (NewTime * slow)));
+                    double p = 1 - Math.Pow(1 - u, 1.5);
+                    if (up) { side = 1; edge = bottom - p * (span + w); }    // 由下往上長
+                    else { side = -1; edge = top + p * (span + w); }         // 由上往下長
+                }
+                else
+                {
+                    double q = Math.Pow(Math.Max(0, Math.Min(1, s / (OldTime * slow))), 1.5);
+                    if (up) { side = -1; edge = bottom + w - q * (span + w); }   // 從底下開始抹
+                    else { side = 1; edge = top - w + q * (span + w); }          // 從上面開始抹
+                }
+                int k = 8 + i * 12;
+                a[k] = t.ClockSlots[o + 1]; a[k + 1] = t.ClockSlots[o + 2]; a[k + 2] = kind == 2 ? 1 : 0;
+                a[k + 4] = t.ClockSlots[o + 3]; a[k + 5] = t.ClockDigitY; a[k + 6] = (float)edge; a[k + 7] = (float)w;
+                a[k + 8] = (float)dx; a[k + 9] = (float)side;
+            }
+            return true;
+        }
+
+        readonly float[] clockAnim = new float[LiquidGlass.ClockAnimFloats];
+
+        static void FreeClockOld(Target t)
+        {
+            LiquidGlass.Free(ref t.ClockOldView);
+            LiquidGlass.Free(ref t.ClockOldTexture);
+            t.ClockSlots = null;
+        }
+
+        static void FreeClockField(Target t)
+        {
+            LiquidGlass.Free(ref t.ClockView);
+            LiquidGlass.Free(ref t.ClockTexture);
+            t.ClockField = null;
+            t.ClockFieldFailed = false;
+            t.ClockGlassOn = false;
         }
 
         // 這一格卡片的動作和卡片上東西的彈簧；回傳還有沒有在動（要不要再畫下一格）。
@@ -294,8 +427,7 @@ namespace VideoWallpaper
             {
                 X = (float)cx, Y = (float)cy, HalfW = (float)(spec.W / 2), HalfH = (float)(spec.H / 2), Radius = (float)spec.Radius,
                 Appear = 1, Thick = (float)Math.Max(0.6, Math.Min(1.5, Math.Min(spec.W, spec.H) / 2 / (cardLook.Bevel * s))),
-                TintR = (float)spec.TintR, TintG = (float)spec.TintG, TintB = (float)spec.TintB, TintA = 0.14f,   // 淡淡的封面色
-                Mag = 1.08f, Shadow = 0.2f, D00 = (float)(1 / sx), D11 = (float)(1 / sy),   // 中央只稍微放大，透過去的背景比較穩
+                Mag = 1, D00 = (float)(1 / sx), D11 = (float)(1 / sy),   // 不染色、不放大、沒有影子（照片裡都沒有）
                 Focus = 0.45f,   // 上下兩條直邊的折射只剩 55%（背景的字不會被拉長）；左右邊、圓角全強度
             };
             // 模糊的範圍：卡片原本的位置加上四周（卡片的慣性移動也還在範圍裡）；要畫的範圍：卡片現在的位置加上影子
@@ -392,6 +524,8 @@ namespace VideoWallpaper
 
         static void ReleaseLiquid(Target t)
         {
+            FreeClockField(t);
+            FreeClockOld(t);
             LiquidGlass.Free(ref t.LiquidRtv);
             LiquidGlass.Free(ref t.LiquidScene);
         }
@@ -399,10 +533,18 @@ namespace VideoWallpaper
         // 已經沒有任何畫面上有卡片了（鎖定畫面收起來）：模糊圖、複本圖還給顯示卡（著色器留著，下次打開不用重建）
         void ReleaseLiquidScratch()
         {
-            if (liquid == null) return;
-            foreach (var other in targets) if (other.Liquid != null) return;
-            liquid.ReleaseScratch();
-            foreach (var other in targets) { other.LiquidBlurW = other.LiquidBlurH = 0; }   // 下次一定重新模糊
+            bool card = false, clock = false;
+            foreach (var other in targets) { if (other.Liquid != null) card = true; if (other.ClockField != null) clock = true; }
+            if (liquid != null && !card)
+            {
+                liquid.ReleaseScratch();
+                foreach (var other in targets) { other.LiquidBlurW = other.LiquidBlurH = 0; }   // 下次一定重新模糊
+            }
+            if (clockLiquid != null && !clock)
+            {
+                clockLiquid.ReleaseScratch();
+                foreach (var other in targets) { other.ClockBlurW = other.ClockBlurH = 0; }
+            }
         }
     }
 }

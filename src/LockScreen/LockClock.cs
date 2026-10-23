@@ -11,13 +11,13 @@ namespace VideoWallpaper
     // 時鐘和天氣在 LockClock.Clock.cs、音樂卡片在 LockClock.MusicCard.cs、封面和卡片顏色在 LockClock.Art.cs、歌詞長圖在 LockClock.Lyrics.cs
     static partial class LockClock
     {
-        // 跟 ChromeOS 一樣用 Google Sans（fonts 資料夾裡的 Google Sans Flex，開源授權；拉丁字母含各種帶符號的字母都有）。
+        // 歌詞跟 ChromeOS 一樣用 Google Sans（fonts 資料夾裡的 Google Sans Flex，開源授權；拉丁字母含各種帶符號的字母都有）。
         // Google Sans 沒有的字依序找：俄文、希臘文用 Segoe UI（有真的半粗體，粗細才跟旁邊的字一致），
         // 中文和日文假名用微軟正黑體，韓文用 Malgun Gothic
-        static readonly FontFamily ClockFont = new FontFamily(
+        static readonly FontFamily LyricsFont = new FontFamily(
             new Uri(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fonts") + "\\"), "./#Google Sans Flex, Segoe UI, Microsoft JhengHei UI, Malgun Gothic");
         static readonly FontFamily IconFont = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets");
-        // 音樂卡片用 Inter（fonts 資料夾裡，開源授權；最接近 Apple 的 SF Pro）；中文用微軟正黑體，其他照時鐘的順序
+        // 時鐘和音樂卡片用 Inter（fonts 資料夾裡，開源授權；最接近 Apple 的 SF Pro）；中文用微軟正黑體，其他照歌詞的順序
         static readonly FontFamily CardFont = new FontFamily(
             new Uri(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fonts") + "\\"), "./#Inter, Microsoft JhengHei UI, Segoe UI, Malgun Gothic");
 
@@ -40,6 +40,7 @@ namespace VideoWallpaper
             return Snapshot(root, width, height);
         }
 
+
         static void Wrap(FrameworkElement content, double s, double pad, out Border root, out int width, out int height)
         {
             content.Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 18 * s, ShadowDepth = 0, Opacity = 0.5, Color = Colors.Black };
@@ -50,9 +51,11 @@ namespace VideoWallpaper
             height = (int)Math.Ceiling(root.DesiredSize.Height);
         }
 
-        static int[] Snapshot(Visual root, int width, int height)
+        static int[] Snapshot(Visual root, int width, int height, int scale = 1)
         {
-            var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+            // scale：放大幾倍畫（版面不變，只是像素變多；算字形距離圖時用，邊緣才準）
+            width *= scale; height *= scale;
+            var bitmap = new RenderTargetBitmap(width, height, 96 * scale, 96 * scale, PixelFormats.Pbgra32);
             bitmap.Render(root);
             var pixels = new int[width * height];
             bitmap.CopyPixels(pixels, width * 4, 0);

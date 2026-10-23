@@ -9,6 +9,7 @@ namespace VideoWallpaper
     //   邊緣：往外取樣的折射（像透鏡的邊，把玻璃外面的東西壓進來；越靠邊壓得越緊、越清楚，不會折返）＋一點色散；
     //   中間：整塊稍微放大（凸透鏡），在輕、重兩級模糊之間取（散射），再加飽和度、白霧、淡淡的有色玻璃；
     //   邊緣的環境反光、固定 45 度光源的細高光、上緣內側的內陰影、外面的影子。
+    // 另外一種是玻璃字（鎖定畫面的時鐘數字）：形狀不是圓角長方形，而是一張字形距離圖（TextGlass）
     // 只在玻璃附近那一小塊執行（模糊也只做那一塊，而且是四分之一解析度），畫面其他地方不碰，顯示卡負擔很小。
     // 著色器在背景執行緒用 Windows 內建的 d3dcompiler_47.dll 編譯；編譯失敗或顯示卡太舊（Direct3D 10 以下）就不用，退回原本的毛玻璃
     class LiquidGlass
@@ -31,6 +32,10 @@ namespace VideoWallpaper
             public float Refract = 0.9f, Bevel = 20, CA = 0.06f, Scatter = 0.86f, Sat = 1.5f, TintAmt = 0.3f;
             public float Legible = 0.3f, Spec = 0.85f, Reflect = 0.3f, Merge = 6, InnerA = 0.06f, InnerR = 8, Inner = 6, Dim = 0;
             public float TouchX, TouchY, TouchGlow, TouchRadius;   // 按住時從手指下面亮起來（亮度 0 就沒有）
+            // 1：清澈的卡片玻璃（色調照 iOS 26「正在播放」卡片的照片量出來的）：背景輕輕糊、加一層平平的無色白（TintAmt），不染色、不放大；
+            // 邊緣照一般的液態玻璃往外取樣、把外面的東西壓進來（Refract、Bevel、CA，上下直邊和圓角打折）；約 1 像素的中性白線，
+            // 左上、右下的圓角最亮、右上、左下的圓角幾乎沒有，內側約 5 像素淡淡提亮（Spec 是這兩個的強度）；沒有影子、內陰影、環境反光
+            public float Clear;
 
             // 第二層（卡片上的小玻璃圓鈕）：底下已經是玻璃了，不再糊、不加白霧，跟旁邊的也不黏在一起
             public static Look OnTop(float scale)
@@ -58,6 +63,7 @@ cbuffer GlassInfo : register(b0)
     float4 C;          // 易讀性、高光、環境反光、黏合距離
     float4 D;          // 內陰影濃度、內陰影寬度、往內反光的寬度、變暗
     float4 Touch;      // 按住：手指的位置 xy、亮度 z、擴散的半徑 w
+    float4 E;          // 清澈的卡片玻璃（1）、（不用）
 };
 cbuffer PassInfo : register(b1)
 {
@@ -67,6 +73,15 @@ cbuffer PassInfo : register(b1)
 Texture2D SceneTex : register(t0);
 Texture2D BlurATex : register(t1);
 Texture2D BlurBTex : register(t2);
+Texture2D FieldTex : register(t3);   // 玻璃字的字形距離圖（離字的邊多遠，像素，字裡面是負的）
+Texture2D OldFieldTex : register(t4);   // 換分鐘的動畫：舊時間的距離圖（畫離開的字）
+cbuffer ClockAnim : register(b2)     // 換分鐘的動畫（沒有動畫時 Anim0.x 是 0）
+{
+    float4 Anim0;      // 幾格、數字頂端再往上一點（以上是日期那一行，照常畫；畫面座標）、舊距離圖的左上角 xy
+    float4 Anim1;      // 舊距離圖的大小 xy
+    float4 Slot[30];   // 每格三個：左右邊界、用哪張圖（0 新、1 舊）、（不用）；中心 xy、遮罩的邊（畫面 y）、漸層寬；
+                       //   現在的左右位移、看得到哪一邊（1：邊以下；−1：邊以上）、（不用）
+};
 SamplerState Lin : register(s0);
 static const float Weights[5] = { 0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216 };
 
@@ -203,6 +218,31 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
     n = n / max(length(n), 1.5 * ne);
     float a = h.appear;
 
+    if (E.x > 0.5)   // 清澈的卡片玻璃（見 Look.Clear）
+    {
+        // 液態玻璃的邊（跟一般的玻璃同一套）：往外取樣，把外面的東西壓進來，上下直邊、圓角打折；越靠邊越清楚、一點色散
+        float cu = max(-h.d, 0.0);
+        float2 nn = n / max(length(n), 1e-4);
+        float bev = max(A.w * s * h.thick, 1e-3);
+        float cedge = 1.0 - saturate(cu / bev);
+        float cdisp = A.z * 0.5 * bev * exp(-cu / (0.35 * bev)) * (1.0 - h.focus * (h.flat + 0.5 * h.corn));
+        float2 coff = n * cdisp * a;
+        float cca = B.x * cedge * (1.0 - 0.7 * h.corn);
+        float csc = B.y * a * (1.0 - 0.75 * exp(-cu / (0.5 * bev)));
+        csc = max(csc, 0.3 * h.corn * cedge * a);
+        float3 ccol = float3(Look(p + coff * (1.0 + cca), csc).r, Look(p + coff, csc).g, Look(p + coff * (1.0 - cca), csc).b);
+        ccol = lerp(ccol, float3(1.0, 1.0, 1.0), B.w * a);       // 一層平平的無色白
+        float nl = dot(nn, float2(-0.70710678, -0.70710678));
+        float w = abs(nl) * (nl > 0.0 ? 1.0 : 0.7);              // 左上、右下的圓角最亮，右上、左下幾乎沒有
+        float ur = cu / s / 0.55;
+        ccol += (1.0 - ccol) * saturate(C.y * 0.3 * w * exp(-ur * ur) * a);   // 細白線（疊亮，不會爆白）
+        ccol += C.y * 0.10 * w * (1.0 - smoothstep(0.0, 5.5 * s, cu)) * a;     // 內側淡淡提亮
+        ccol = lerp(ccol, float3(1.0, 1.0, 1.0), 0.24 * h.energy * a);         // 按下：整塊被白光填滿
+        float2 cgp = p - Touch.xy;
+        ccol += a * Touch.z * 0.13 * exp(-dot(cgp, cgp) / (2.0 * Touch.w * Touch.w + 1.0));
+        return float4(lerp(outside, ccol, saturate(0.5 - h.d)), 1.0);
+    }
+
     // 邊緣往外取樣（像透鏡的邊，把玻璃外面的東西壓進來）：位移 = 強度 × 0.5 × 邊寬 × e^(−深度 / (0.35 × 邊寬))；
     // 越靠邊壓得越緊，取樣位置一直往同一個方向走，不會折返、不會抹成一片
     float bev = max(A.w * s * h.thick, 1e-3);
@@ -252,6 +292,108 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
     col += a * Touch.z * 0.13 * exp(-dot(gp, gp) / (2.0 * Touch.w * Touch.w + 1.0));
     return float4(lerp(outside, col, saturate(0.5 - h.d)), 1.0);
 }
+
+// ---------- 玻璃字（時鐘的數字，照 iOS 26 鎖定畫面「玻璃」時鐘、透明度最低的照片量出來的）----------
+//   裡面：一扇清澈的窗，不放大、不染色、不改飽和度，只輕輕糊一點（細小的斑點抹掉、大的形狀還清楚），
+//         再加一層平平的、無色的白（暗的背景約 5%、亮的約 3%）；
+//   邊緣：只有最外緣一兩個像素往字裡面取樣（穿過邊的線條被彎成沿著邊的細鉤，筆畫下緣看起來像往下滴），邊上一點點色散；
+//         緊貼邊緣內側一段柔和的提亮；數字裡的洞（0、4、6、8、9 中間）那一側的邊有一條細暗帶；
+//   輪廓：約一像素的細線，顏色是背景提亮（不是純白），左上、右下各一段亮弧、兩端漸細，其他地方只剩很淡的暗線；
+//   沒有影子、沒有內線、沒有立體浮雕。
+// 字形距離圖貼在 Shape[0]（左上角 xy、大小 zw）：r 是離字的邊多遠（字裡面是負的）、g 是離洞多遠（像素）、b 是字的大小（時間 1，日期比較小）；
+// A.z、A.w 是邊緣往裡取樣的強度和衰減（1080p 的像素）；B.x 色散（像素）、B.y 模糊；C.x 白的濃度、C.y 輪廓線
+float3 FieldAt(float2 p) { return FieldTex.SampleLevel(Lin, (p - Shape[0].xy) / Shape[0].zw, 0).rgb; }
+
+// 換分鐘的動畫：在新 / 舊距離圖的 (x0, x1) 這一格裡取 q 的距離；超出這一格的地方用格子邊上的值加上超出的距離（距離才是連續的）
+float3 SlotField(float2 q, float x0, float x1, bool old)
+{
+    float4 r = old ? float4(Anim0.zw, Anim0.zw + Anim1.xy) : float4(Shape[0].xy, Shape[0].xy + Shape[0].zw);
+    float2 qc = float2(clamp(q.x, x0, x1), clamp(q.y, Anim0.y, r.w - 1.0));
+    float3 f = old ? OldFieldTex.SampleLevel(Lin, (qc - Anim0.zw) / Anim1.xy, 0).rgb : FieldAt(qc);
+    f.x += length(q - qc);
+    return f;
+}
+
+// 這一點的距離圖。換分鐘的動畫中，時間那一行由每一格拼起來：每個字照自己的位置取距離，再乘上一道上下的漸層遮罩（字本身不變形）；
+// alpha 是遮罩在這一點的值（字看得到多少，外面那圈暗暈也跟著）；blur 留給以後用（現在是 0）
+float3 FieldDH(float2 p, out float alpha, out float blur)
+{
+    alpha = 1.0; blur = 0.0;
+    int n = (int)Anim0.x;
+    if (n == 0) return FieldAt(p);
+    float3 best = float3(1e4, 1e4, 1.0);
+    if (p.y < Anim0.y) best = FieldAt(p);                      // 時間上面（日期那一行）照常
+    float pick = best.x;                                       // 選最近的字；遮罩淡的（快抹掉、剛長出來）算遠一點，不搶旁邊的字的暗暈
+    [loop] for (int i = 0; i < 10; i++)
+    {
+        if (i >= n) break;
+        float4 a = Slot[i * 3], b = Slot[i * 3 + 1], c = Slot[i * 3 + 2];
+        float al = saturate(c.y * (p.y - b.z) / max(b.w, 1e-3));
+        if (al < 0.003) continue;
+        float3 f = SlotField(p - float2(c.x, 0.0), a.x, a.y, a.z > 0.5);
+        float fp = f.x + (1.0 - al) * 40.0 * A.y;
+        if (fp < pick) { pick = fp; best = f; alpha = al; }
+    }
+    return best;
+}
+
+float FieldD(float2 p) { float a = 1.0, b = 0.0; return FieldDH(p, a, b).r; }
+
+float4 TextGlass(float4 pos : SV_Position) : SV_Target
+{
+    float2 p = pos.xy;
+    float s = A.y;
+    float3 bg = SceneTex.SampleLevel(Lin, (p - SceneRect.xy) / SceneRect.zw, 0).rgb;
+    float alpha, blur;
+    float3 dh = FieldDH(p, alpha, blur);
+    float d = dh.x;
+    float clear = 1.0 - saturate(blur / (8.0 * s));           // 換分鐘時糊掉的字：邊緣的折射、亮邊跟著變淡
+    float k = max(dh.z, 0.2);                                // 字的大小：小字的折射和模糊跟著縮小
+    // 背景很亮時（例如白天的天空）玻璃幾乎看不見：字外面加一圈很淡、很柔的暗暈，把字跟背景分開（暗的背景不加）
+    float bright = smoothstep(0.5, 0.85, Luma(BlurBTex.SampleLevel(Lin, (p - BlurRect.xy) / BlurRect.zw, 0).rgb));
+    float3 outside = bg * (1.0 - 0.07 * bright * alpha * exp(-max(d, 0.0) / (4.0 * s)));
+    float soft = max(1.0, blur);
+    if (d > soft) return float4(outside, 1.0);
+    // 1：日期那一行的小字。筆畫只有幾像素寬，邊緣的細鉤、洞的暗帶、內側提亮、暗線都會讓每一筆變成兩條線夾著（像空心字），
+    // 小字不加這些，改成字本身的玻璃濃一點（一整塊）
+    float small = 1.0 - smoothstep(0.4, 0.9, dh.z);
+
+    // 邊緣的方向（字形距離圖的斜率，往字外面）、離邊多深（1080p 的像素）
+    // 斜率取左右、上下各 2.5 像素（只差 1 像素的話，斜邊上方向會一格一格地跳，亮線、暗線跟著變成虛線）
+    float e = 2.5 * s;
+    float2 g = float2(FieldD(p + float2(e, 0.0)) - FieldD(p - float2(e, 0.0)), FieldD(p + float2(0.0, e)) - FieldD(p - float2(0.0, e)));
+    g = g / max(length(g), 1e-4);
+    float u = max(-d, 0.0) / s;
+
+    // 最外緣往字裡面取樣（細鉤）；邊上一點點色散（紅往外、藍往內）
+    float hook = A.z * k * (1.0 - small) * clear * exp(-u / A.w) * (1.0 - smoothstep(3.0, 4.5, u));
+    float2 q = p - g * (hook * s);
+    float cab = B.x * exp(-u / 1.2) * s;
+    float3 col = float3(Look(q + g * cab, B.y * k).r, Look(q, B.y * k).g, Look(q - g * cab, B.y * k).b);
+
+    // 一層平平的、無色的白（暗的背景多一點）
+    float Lb = Luma(BlurBTex.SampleLevel(Lin, (p - BlurRect.xy) / BlurRect.zw, 0).rgb);
+    col += C.x * lerp(0.05, 0.028, smoothstep(0.08, 0.75, Lb));
+
+    // 方向：左上、右下各一段亮弧（約 70°），兩端漸細
+    float2 L = float2(-0.70710678, -0.70710678);
+    float D = smoothstep(0.5, 0.92, max(dot(g, L), 0.9 * dot(g, -L)));
+    // 緊貼邊緣內側一段柔和的提亮；洞那一側的邊一條細暗帶
+    col += C.x * 0.12 * (1.0 - small) * exp(-u / 1.3) * (0.4 + 0.6 * D);
+    col += C.x * 0.05 * small * (1.0 - bright);              // 小字：暗的背景上多一點乳白
+    float hole = exp(-max(dh.y / s - 0.5, 0.0) / 1.5);
+    col *= 1.0 - 0.3 * (1.0 - 0.7 * bright) * (1.0 - small) * hole * exp(-u / 1.3);
+    col *= 1.0 - (0.14 + 0.14 * small) * bright;              // 亮的背景上變成淡淡的煙燻玻璃（還是透明的；小字濃一點）
+    // 輪廓：約一像素多的細線（中心在邊內 0.7 像素），顏色是背景提亮；亮弧的地方亮，其他地方只剩很淡的暗線
+    float rp = exp(-(u - 0.7) * (u - 0.7) / (2.0 * 0.7 * 0.7));
+    float ra = C.y * rp * (0.12 + 0.75 * D) * lerp(0.45, 0.85, smoothstep(0.05, 0.5, Lb)) * (1.0 - 0.4 * bright) * (1.0 - 0.5 * small);
+    col = lerp(col, lerp(bg, float3(1.0, 1.0, 1.0), 0.55), saturate(ra * clear));
+    // 很淡的暗線；亮的背景上整圈加深，輪廓才看得出來。比亮線往內、寬一點（中心在邊內 1.2 像素、寬約 2.6 像素）：
+    // 線太細的話，斜的邊（例如 5 上面那段）每一列落在像素上的位置不同、深淺跟著跳，看起來像虛線、一格一格的階梯
+    float rd = exp(-(u - 1.2) * (u - 1.2) / (2.0 * 1.3 * 1.3));
+    col *= 1.0 - (0.08 + 0.1 * bright) * alpha * (1.0 - small) * rd * (1.0 - 0.5 * D);
+    return float4(lerp(outside, col, saturate(0.5 - d / soft) * alpha), 1.0);
+}
 ";
 
         // ---------- 編譯（背景執行緒，整個程式只做一次）----------
@@ -260,7 +402,7 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
             [MarshalAs(UnmanagedType.LPStr)] string entryPoint, [MarshalAs(UnmanagedType.LPStr)] string target, uint flags1, uint flags2, out IntPtr code, out IntPtr errors);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate IntPtr BlobFn(IntPtr self);
 
-        static byte[] vsCode, downCode, blurCode, glassCode;
+        static byte[] vsCode, downCode, blurCode, glassCode, textCode;
         static int compileState;   // 0 還沒開始、1 編譯中、2 好了、3 失敗
 
         // 開始在背景編譯（已經在編、編好了就不重來）
@@ -276,6 +418,7 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
                     downCode = Compile(src, "Down", "ps_4_0");
                     blurCode = Compile(src, "Blur", "ps_4_0");
                     glassCode = Compile(src, "Glass", "ps_4_0");
+                    try { textCode = Compile(src, "TextGlass", "ps_4_0"); } catch { textCode = null; }   // 失敗只有時鐘退回實心字
                     Interlocked.Exchange(ref compileState, 2);
                 }
                 catch
@@ -336,6 +479,7 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void SetViewportsFn(IntPtr self, uint count, ref Viewport viewport);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void CopyRegionFn(IntPtr self, IntPtr dst, uint dstSub, uint x, uint y, uint z, IntPtr src, uint srcSub, ref Box box);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void UpdateFn(IntPtr self, IntPtr dst, uint sub, IntPtr box, float[] data, uint rowPitch, uint depthPitch);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void UpdateHalfFn(IntPtr self, IntPtr dst, uint sub, IntPtr box, ushort[] data, uint rowPitch, uint depthPitch);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void ClearStateFn(IntPtr self);
 
         const int Bgra = 87;   // DXGI_FORMAT_B8G8R8A8_UNORM（跟輸出畫面一樣）
@@ -353,12 +497,15 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
         readonly SetViewportsFn rsSetViewports;
         readonly CopyRegionFn copyRegion;
         readonly UpdateFn update;
+        readonly UpdateHalfFn updateHalf;
         readonly ClearStateFn clearState;
 
-        IntPtr vs, downPs, blurPs, glassPs, sampler, glassBuffer, passBuffer;
-        readonly float[] glassData = new float[31 * 4];   // 跟 cbuffer GlassInfo 一樣的排法（31 個 float4）
+        IntPtr vs, downPs, blurPs, glassPs, textPs, sampler, glassBuffer, passBuffer, animBuffer;
+        public const int ClockAnimFloats = (2 + 30) * 4;   // 跟 cbuffer ClockAnim 一樣的排法
+        static readonly float[] noAnim = new float[ClockAnimFloats];
+        readonly float[] glassData = new float[32 * 4];   // 跟 cbuffer GlassInfo 一樣的排法（32 個 float4）
         readonly float[] passData = new float[8];
-        readonly IntPtr[] one = new IntPtr[1], two = new IntPtr[2], three = new IntPtr[3];
+        readonly IntPtr[] one = new IntPtr[1], two = new IntPtr[2], three = new IntPtr[3], five = new IntPtr[5];
 
         // 模糊用的四張小圖（四分之一解析度）
         class Small { public IntPtr Texture, Rtv, Srv; }
@@ -388,6 +535,7 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
             rsSetViewports = ComVtable.Method<SetViewportsFn>(context, 44);        // ::RSSetViewports
             copyRegion = ComVtable.Method<CopyRegionFn>(context, 46);              // ::CopySubresourceRegion
             update = ComVtable.Method<UpdateFn>(context, 48);                      // ::UpdateSubresource
+            updateHalf = ComVtable.Method<UpdateHalfFn>(context, 48);              // 同一個函式（資料是 16 位元浮點數）
             clearState = ComVtable.Method<ClearStateFn>(context, 110);             // ::ClearState
         }
 
@@ -413,12 +561,15 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
             if (createPs(device, downCode, (IntPtr)downCode.Length, IntPtr.Zero, out downPs) < 0) return false;
             if (createPs(device, blurCode, (IntPtr)blurCode.Length, IntPtr.Zero, out blurPs) < 0) return false;
             if (createPs(device, glassCode, (IntPtr)glassCode.Length, IntPtr.Zero, out glassPs) < 0) return false;
+            if (textCode == null || createPs(device, textCode, (IntPtr)textCode.Length, IntPtr.Zero, out textPs) < 0) textPs = IntPtr.Zero;   // 只有時鐘退回實心字
             var sd = new SamplerDesc { Filter = 0x15 /* 線性 */, AddressU = 3, AddressV = 3, AddressW = 3 /* 超出範圍用邊緣的顏色 */, ComparisonFunc = 1, MaxLod = float.MaxValue };
             if (ComVtable.Method<CreateSamplerFn>(device, 23)(device, ref sd, out sampler) < 0) return false;   // ::CreateSamplerState
             var bd = new BufferDesc { ByteWidth = (uint)(glassData.Length * 4), BindFlags = 0x4 /* 常數 */ };
             if (createBuffer(device, ref bd, IntPtr.Zero, out glassBuffer) < 0) return false;
             bd.ByteWidth = (uint)(passData.Length * 4);
             if (createBuffer(device, ref bd, IntPtr.Zero, out passBuffer) < 0) return false;
+            bd.ByteWidth = ClockAnimFloats * 4;
+            if (createBuffer(device, ref bd, IntPtr.Zero, out animBuffer) < 0) return false;
             return true;
         }
 
@@ -434,6 +585,51 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
         // reblur = false：沿用上次的模糊圖（影片沒換格、範圍沒變）
         // 畫不了（模糊圖建不起來，例如顯示卡記憶體不夠）回傳 false
         public bool DrawLayer(IntPtr scene, int sceneW, int sceneH, IntPtr target, Shape[] shapes, int count, Look look,
+            int bx, int by, int bw, int bh, int dx, int dy, int dw, int dh, bool reblur)
+        {
+            return Draw(glassPs, IntPtr.Zero, IntPtr.Zero, null, scene, sceneW, sceneH, target, shapes, count, look, bx, by, bw, bh, dx, dy, dw, dh, reblur);
+        }
+
+        // ---------- 玻璃字：時鐘的數字 ----------
+        // field 是 CreateField 建的字形距離圖，貼在畫面的 (fx, fy)、大小 fw × fh；換分鐘的動畫中 oldField 是舊時間的距離圖、
+        // anim 是這一格的動畫（ClockAnimFloats 個，排法跟 cbuffer ClockAnim 一樣；沒有動畫是 null）。其他參數跟 DrawLayer 一樣
+        public bool DrawText(IntPtr scene, int sceneW, int sceneH, IntPtr target, IntPtr field, float fx, float fy, float fw, float fh,
+            IntPtr oldField, float[] anim, Look look, int bx, int by, int bw, int bh, int dx, int dy, int dw, int dh, bool reblur)
+        {
+            textShape[0] = new Shape { X = fx, Y = fy, HalfW = fw, HalfH = fh };
+            return Draw(textPs, field, oldField, anim, scene, sceneW, sceneH, target, textShape, 1, look, bx, by, bw, bh, dx, dy, dw, dh, reblur);
+        }
+
+        readonly Shape[] textShape = new Shape[1];
+
+        // 32 位元浮點數換成 16 位元（超過範圍的夾到 ±65504；距離圖的值不會小到需要次正規數，直接當 0）
+        static ushort Half(float f)
+        {
+            int bits = BitConverter.ToInt32(BitConverter.GetBytes(f), 0);
+            int sign = (bits >> 16) & 0x8000, exp = ((bits >> 23) & 0xff) - 127 + 15, mant = bits & 0x7fffff;
+            if (exp <= 0) return (ushort)sign;
+            if (exp >= 31) return (ushort)(sign | 0x7bff);
+            return (ushort)(sign | (exp << 10) | (mant >> 13));
+        }
+
+        // 字形距離圖放上顯示卡（每個點四個 16 位元浮點數：Direct3D 10.0 的顯示卡就一定能平滑取樣，32 位元的要 10.1 才保證；
+        // 精度在幾十像素內約 0.03，夠用）。data 是交錯排的四個值。玻璃字的著色器沒編好、或建不起來回傳 false
+        public bool CreateField(float[] data, int w, int h, out IntPtr texture, out IntPtr view)
+        {
+            texture = view = IntPtr.Zero;
+            if (textPs == IntPtr.Zero) return false;
+            var half = new ushort[data.Length];
+            for (int i = 0; i < data.Length; i++) half[i] = Half(data[i]);
+            var desc = new Texture2DDesc { Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1, Format = 10 /* R16G16B16A16_FLOAT */, SampleCount = 1, BindFlags = 0x8 };
+            if (createTexture(device, ref desc, IntPtr.Zero, out texture) < 0) { texture = IntPtr.Zero; return false; }
+            updateHalf(context, texture, 0, IntPtr.Zero, half, (uint)(w * 8), 0);
+            view = CreateReadView(texture);
+            if (view == IntPtr.Zero) { Free(ref texture); return false; }
+            return true;
+        }
+
+        // 模糊後面的影片（需要的話），再用 ps 把玻璃畫到 target 上；field 是玻璃字的字形距離圖（圓角長方形的玻璃不用，0）
+        bool Draw(IntPtr ps, IntPtr field, IntPtr oldField, float[] anim, IntPtr scene, int sceneW, int sceneH, IntPtr target, Shape[] shapes, int count, Look look,
             int bx, int by, int bw, int bh, int dx, int dy, int dw, int dh, bool reblur)
         {
             int qw = Math.Max(1, (bw + 3) / 4), qh = Math.Max(1, (bh + 3) / 4);
@@ -466,9 +662,10 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
             }
             if (dw <= 0 || dh <= 0) { clearState(context); return true; }
             SetTarget(target, dx, dy, dw, dh);
-            psSetShader(context, glassPs, IntPtr.Zero, 0);
-            three[0] = scene; three[1] = blur[2].Srv; three[2] = blur[3].Srv;
-            psSetResources(context, 0, 3, three);
+            psSetShader(context, ps, IntPtr.Zero, 0);
+            five[0] = scene; five[1] = blur[2].Srv; five[2] = blur[3].Srv; five[3] = field; five[4] = oldField;
+            psSetResources(context, 0, 5, five);
+            update(context, animBuffer, 0, IntPtr.Zero, anim ?? noAnim, 0, 0);
             Pack(shapes, count, look, 0, 0, sceneW, sceneH, bx, by, qw * 4, qh * 4);
             draw(context, 3, 0);
             clearState(context);   // 狀態還原成預設，不影響影片解碼器和 Direct2D
@@ -500,8 +697,8 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
             iaSetTopology(context, 4 /* 三角形清單 */);
             vsSetShader(context, vs, IntPtr.Zero, 0);
             one[0] = sampler; psSetSamplers(context, 0, 1, one);
-            two[0] = glassBuffer; two[1] = passBuffer;
-            psSetConstants(context, 0, 2, two);
+            three[0] = glassBuffer; three[1] = passBuffer; three[2] = animBuffer;
+            psSetConstants(context, 0, 3, three);
         }
 
         void SetTarget(IntPtr rtv, int x, int y, int w, int h)
@@ -552,6 +749,7 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
             Put(g, 28, look.Legible, look.Spec, look.Reflect, look.Merge);
             Put(g, 29, look.InnerA, look.InnerR, look.Inner, look.Dim);
             Put(g, 30, look.TouchX, look.TouchY, look.TouchGlow, look.TouchRadius);
+            Put(g, 31, look.Clear, 0, 0, 0);
             update(context, glassBuffer, 0, IntPtr.Zero, g, 0, 0);
         }
 
@@ -611,8 +809,8 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
         public void Release()
         {
             ReleaseScratch();
-            Free(ref glassBuffer); Free(ref passBuffer); Free(ref sampler);
-            Free(ref glassPs); Free(ref blurPs); Free(ref downPs); Free(ref vs);
+            Free(ref glassBuffer); Free(ref passBuffer); Free(ref animBuffer); Free(ref sampler);
+            Free(ref textPs); Free(ref glassPs); Free(ref blurPs); Free(ref downPs); Free(ref vs);
         }
     }
 }

@@ -68,7 +68,9 @@ Turning the option off removes it. Only if creating the task fails does it fall 
 ## Lock screen (ChromeOS style)
 
 - The lock button in the control panel (or **Win+Shift+L** from anywhere) slides the whole screen down from the top and plays the video full screen,
-  with a clock (12-hour, with AM / PM), the current weather (°C) and the date (for example "Saturday, October 3") in the bottom-left corner.
+  with a clock (12-hour, without AM / PM like the iPhone), the current weather (°C) and the date (for example "Saturday, October 3") in the bottom-left corner.
+  The time digits are liquid glass, like the Glass clock on the iOS 26 Lock Screen: the video behind them shows through, bent at the edges, with a bright rim
+  (on graphics cards older than Direct3D 10 they are plain white).
 - Press Space (or Enter, Esc) or click the mouse: the screen slides up and you're back on the desktop.
 - Switching to another app (Alt+Tab, Win key) or pressing Alt+F4 also slides it away.
 - This is a full-screen view that *looks like* a lock screen. It does not ask for a password; use Win+L to actually lock your PC.
@@ -102,7 +104,7 @@ Turning the option off removes it. Only if creating the task fails does it fall 
   - Time-synced lyrics follow the singing precisely. Plain lyrics (without timestamps) scroll evenly over the song's length without highlighting a line.
 - **Shuffle** and **repeat** (off → all → one) work with players that support them; they are dimmed for players that don't.
 - The mouse cursor only appears when you move the mouse and hides after 2.5 seconds (it stays visible while it's over the music card).
-- The clock font is Google Sans Flex and the music card uses Inter (both in the `fonts` folder under the SIL Open Font License, see `fonts\OFL.txt` and `fonts\Inter-OFL.txt`).
+- The clock and the music card use Inter, and the lyrics use Google Sans Flex (both in the `fonts` folder under the SIL Open Font License, see `fonts\Inter-OFL.txt` and `fonts\OFL.txt`).
 - Weather: the rough location is found from your IP address with ipapi.co (fallback: ipwho.is), then the weather comes from Open-Meteo, updated at most every 20 minutes.
   To set a location instead of using your IP, add a line `weatherlocation=latitude,longitude` to `settings.ini` (for example `weatherlocation=22.99,120.21`).
 
@@ -219,7 +221,8 @@ A picture is drawn once by the graphics card and only redrawn when something cha
 ## 鎖定畫面（仿 ChromeOS）
 
 - 控制面板的鎖頭按鈕（或在任何地方按 **Win+Shift+L**）：整個畫面會從上面滑下來，全螢幕播放影片，
-  左下角顯示時鐘（12 小時制，後面有 AM / PM）、目前天氣（攝氏）和英文日期（例如「Saturday, October 3」）。
+  左下角顯示時鐘（12 小時制，跟 iPhone 一樣不顯示 AM / PM）、目前天氣（攝氏）和英文日期（例如「Saturday, October 3」）。
+  時間的數字是液態玻璃，像 iOS 26 鎖定畫面的「玻璃」時鐘：透出後面的影片、邊緣會折射，還有一圈亮邊（Direct3D 10 以前的舊顯示卡是一般的白字）。
 - 按空白鍵（或 Enter、Esc）、或按一下滑鼠：畫面往上滑走，回到桌面。
 - 切到別的程式（Alt+Tab、Win 鍵）或按 Alt+F4 也會滑走。
 - 這是「看起來像鎖定畫面」的全螢幕畫面，不會要求密碼；要真正鎖定電腦請用 Win+L。
@@ -248,7 +251,7 @@ A picture is drawn once by the graphics card and only redrawn when something cha
   - 有時間標記的歌詞會準確跟著唱；只有一般歌詞（沒有時間標記）的話，照歌曲長度平均慢慢捲，不會特別強調哪一行。
 - **隨機播放**和**循環**（關 → 全部 → 單曲）：播放器支援就能用，不支援的會變淡。
 - 移動滑鼠時才會出現游標，停 2.5 秒自動隱藏（停在音樂卡片上時不會隱藏）。
-- 時鐘字體是 Google Sans Flex，音樂卡片用 Inter（都放在 `fonts` 資料夾，SIL Open Font License，授權條款見 `fonts\OFL.txt`、`fonts\Inter-OFL.txt`）。
+- 時鐘和音樂卡片用 Inter，歌詞用 Google Sans Flex（都放在 `fonts` 資料夾，SIL Open Font License，授權條款見 `fonts\Inter-OFL.txt`、`fonts\OFL.txt`）。
 - 天氣：先用 ipapi.co（備用 ipwho.is）依網路 IP 查大概位置，再向 Open-Meteo 查天氣，每 20 分鐘最多更新一次。
   想指定位置、不用 IP 判斷的話，在 `settings.ini` 加一行 `weatherlocation=緯度,經度`（例如 `weatherlocation=22.99,120.21`）。
 

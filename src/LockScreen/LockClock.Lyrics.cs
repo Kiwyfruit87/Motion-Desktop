@@ -42,7 +42,7 @@ namespace VideoWallpaper
         {
             var block = new TextBlock
             {
-                Text = text, FontFamily = ClockFont, FontSize = Math.Round(20 * s), FontWeight = FontWeights.SemiBold, Foreground = Brushes.White,
+                Text = text, FontFamily = LyricsFont, FontSize = Math.Round(20 * s), FontWeight = FontWeights.SemiBold, Foreground = Brushes.White,
                 TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Left, Width = width,
             };
             TextOptions.SetTextFormattingMode(block, TextFormattingMode.Ideal);

@@ -22,6 +22,7 @@ namespace VideoWallpaper
         LockClock.MusicCard card;    // 卡片目前的樣子和位置
         DispatcherTimer clockTimer;
         string shownClock, shownMusic;
+        LockClock.ClockImage lastClock;   // 上次畫的時鐘（換分鐘的動畫從它開始；收起來時清掉，下次打開不播動畫）
         string shownSong;            // 卡片上目前顯示的是哪首歌（換歌時封面和文字要翻頁）
         double shownMicLevel = -1;   // 歌詞按鈕現在的亮度
         bool shownPlaying;           // 播放鍵現在畫的是暫停（播放中）嗎
@@ -179,9 +180,11 @@ namespace VideoWallpaper
             string clockKey = LockClock.ClockKey(now);
             if (!force && clockKey == shownClock) return;
             shownClock = clockKey;
-            int w, h, x, y;
-            var clock = LockClock.RenderClock(now, primary.Bounds.Height, out w, out h, out x, out y);
-            engine.SetOverlay(primary.Handle, "clock", clock, w, h, x, y);
+            var clock = LockClock.RenderClock(now, primary.Bounds.Width, primary.Bounds.Height);
+            // 時間的數字：引擎畫得出液態玻璃就畫玻璃，畫不了才用實心字；換分鐘時變了的字有動畫（剛打開時沒有）
+            engine.SetClock(primary.Handle, clock.Solid, clock.Field, clock.Width, clock.Height, clock.X, clock.Y, clock.Scale,
+                LockClock.ClockSlots(lastClock, clock), clock.TimeTop, clock.DigitCenterY, clock.DigitHeight);
+            lastClock = clock;
         }
 
         // 右下角的音樂卡片：換歌、播放或暫停、封面變了才整張重畫；沒在播就拿掉。
@@ -468,6 +471,7 @@ namespace VideoWallpaper
             Covering = false;
             busy = false;
             if (clockTimer != null) clockTimer.Stop();
+            lastClock = null;
             lyrics.Close();
             shownSong = null;   // 下次打開時卡片直接出現，不播換歌動畫
             shownMicLevel = -1;
