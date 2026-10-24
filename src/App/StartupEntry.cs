@@ -15,9 +15,16 @@ namespace VideoWallpaper
         const string RunName = "VideoWallpaper";
 
         static bool? cache;
+        static volatile int generation;   // 切換過開關就加一：背景還在查的舊結果不要蓋掉新的
         public static bool IsEnabled(bool fresh = false)
         {
-            if (fresh || cache == null) cache = StartupTaskExists() || RunEntryExists();
+            if (fresh || cache == null)
+            {
+                int gen = generation;
+                bool value = StartupTaskExists() || RunEntryExists();
+                if (gen == generation) cache = value;
+                return value;
+            }
             return cache.Value;
         }
 
@@ -54,7 +61,7 @@ namespace VideoWallpaper
                 if (enable && !taskCreated) key.SetValue(RunName, "\"" + WinForms.Application.ExecutablePath + "\"");
                 else key.DeleteValue(RunName, false);
             }
-            cache = null;   // 下次問的時候重新查
+            generation++; cache = null;   // 下次問的時候重新查
         }
 
         // 已經開啟自動啟動時：舊的 Run 設定換成排程；exe 被搬走時更新路徑；

@@ -15,6 +15,9 @@ namespace VideoWallpaper
         public class ClockImage
         {
             public int[] Solid;     // 實心的白字（畫不了玻璃時用，例如顯示卡太舊）
+            public int[] Shape;     // 字的形狀（兩倍解析度，不加陰影；算完距離圖就丟掉）
+            public int Split;       // Shape 裡日期那一行和時間的分界（列）
+            public float TopScale;  // 日期的字跟時間的大小比例
             public float[] Field;   // 字形距離圖，每個點四個值：離字的邊多遠（像素，字裡面是負的）、離字裡的洞（0、6、9、a、o 中間空的地方）多遠、
                                     // 字的大小（時間是 1，日期那一行比較小）、（不用）
             public int Width, Height, X, Y;
@@ -110,7 +113,7 @@ namespace VideoWallpaper
                 // 跟日期隔一段；圖示中心對齊文字的中間
                 icon.Margin = new Thickness(Math.Round(dateSize * 0.7), 0, Math.Round(dateSize * 0.22), Math.Round(dateSize * 0.36 - iconSize / 2));
                 date.Inlines.Add(new InlineUIContainer(icon) { BaselineAlignment = BaselineAlignment.Baseline });
-                date.Inlines.Add(new Run(Math.Round(weather.TempC).ToString("0", CultureInfo.InvariantCulture) + "°"));
+                date.Inlines.Add(new Run((Math.Round(weather.TempC) + 0.0).ToString("0", CultureInfo.InvariantCulture) + "°"));   // + 0.0：−0 變成 0（不然會顯示「-0°」）
             }
             // 時間：大數字的行高上面留很多空，往上拉近日期一點
             var time = new TextBlock
@@ -126,13 +129,15 @@ namespace VideoWallpaper
             var image = new ClockImage { Scale = s };
             Border root;
             image.Solid = ToPixels(lines, s, pad, out root, out image.Width, out image.Height);
-            lines.Effect = null;                                                  // 字的形狀本身（不要陰影）
+            lines.Effect = null;                                                  // 字的形狀本身（不要陰影，天氣圖示的光暈也拿掉）
+            ClearEffects(lines);
             // 日期那一行（上半部）的字小、筆畫細：邊緣的折射跟著字的大小縮小
             int split = (int)Math.Round(pad + date.ActualHeight + time.Margin.Top / 2);
-            // 用兩倍的解析度畫字的形狀、算距離，再縮回來：一般解析度算的邊緣會微微抖動（彎的字最明顯，例如 5）
+            // 用兩倍的解析度畫字的形狀（算距離圖用，見 ComputeField；一般解析度算的邊緣會微微抖動，彎的字最明顯，例如 5）
             root.UpdateLayout();
-            image.Field = Shrink(DistanceField(Snapshot(root, image.Width, image.Height, 2), image.Width * 2, image.Height * 2, split * 2, (float)(dateSize / timeSize)),
-                image.Width, image.Height);
+            image.Shape = Snapshot(root, image.Width, image.Height, 2);
+            image.Split = split * 2;
+            image.TopScale = (float)(dateSize / timeSize);
             image.X = (int)Math.Round((screenWidth - image.Width) / 2.0);       // 左右置中
             image.Y = (int)Math.Round(screenHeight * 0.095 - pad);               // 日期的頂端約在畫面高度的 9.5%
             // 每個字的左右邊界、數字的位置（換分鐘的動畫用）：用同樣的字型量每段前綴的寬度
@@ -156,6 +161,22 @@ namespace VideoWallpaper
         //   離字裡的洞多遠（像素）：從圖的四邊往裡填，填不到的空白就是洞（0、6、9、a、o 中間），洞那一側的邊比較暗；
         //   字的大小：第 split 列以上（日期那一行）是 topScale，以下（時間）是 1；第四個值不用。
         // 沒有任何字（都是正的）回傳 null
+        // 從 RenderClock 畫好的形狀算出字形距離圖（Field），再把形狀丟掉。只用到陣列，可以在背景執行緒做（4K 時要零點幾秒）
+        public static void ComputeField(ClockImage c)
+        {
+            if (c.Shape == null) return;
+            c.Field = Shrink(DistanceField(c.Shape, c.Width * 2, c.Height * 2, c.Split, c.TopScale, (int)Math.Max(16, 12 * 4 * c.Scale * c.Scale)), c.Width, c.Height);
+            c.Shape = null;
+        }
+
+        // 拿掉 d 底下所有的效果（天氣圖示的光暈之類；算字的形狀時不要）
+        static void ClearEffects(DependencyObject d)
+        {
+            var ui = d as UIElement;
+            if (ui != null) ui.Effect = null;
+            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(d); i++) ClearEffects(VisualTreeHelper.GetChild(d, i));
+        }
+
         // 兩倍解析度的距離圖（每個點四個值）縮回 w × h：每 2 × 2 格平均，距離除以 2；沒有字（null）照樣回傳 null
         static float[] Shrink(float[] big, int w, int h)
         {
@@ -173,14 +194,14 @@ namespace VideoWallpaper
             return small;
         }
 
-        static float[] DistanceField(int[] pixels, int w, int h, int split, float topScale)
+        static float[] DistanceField(int[] pixels, int w, int h, int split, float topScale, int minHole)
         {
             int n = w * h;
             var inside = new bool[n];
             bool any = false;
             for (int i = 0; i < n; i++) { inside[i] = ((pixels[i] >> 24) & 255) >= 128; any |= inside[i]; }
             if (!any) return null;
-            double[] toHole = SquaredDistance(Holes(inside, w, h), w, h, true);
+            double[] toHole = SquaredDistance(Holes(inside, w, h, minHole), w, h, true);
             var field = EdgeDistance(pixels, inside, w, h);
             var all = new float[n * 4];
             for (int i = 0; i < n; i++)
@@ -264,26 +285,33 @@ namespace VideoWallpaper
         }
 
         // 數字裡的洞：字外面、但從圖的四邊走不到的空白（往八個方向走，斜的邊在格子上的階梯縫隙才不會卡住）；
-        // 小於 minArea 個像素的空白不算（斜邊上偶爾還是會圍出一兩個像素，當成洞的話邊上會出現一段一段的暗點）
-        static bool[] Holes(bool[] inside, int w, int h)
+        // 小於 minArea 個像素的空白不算（斜邊上偶爾還是會圍出一兩個像素，當成洞的話邊上會出現一段一段的暗點；跟字的大小走）
+        static bool[] Holes(bool[] inside, int w, int h, int minArea)
         {
             var reached = new bool[w * h];
             var stack = new System.Collections.Generic.Stack<int>();
-            for (int x = 0; x < w; x++) { stack.Push(x); stack.Push((h - 1) * w + x); }
-            for (int y = 0; y < h; y++) { stack.Push(y * w); stack.Push(y * w + w - 1); }
+            for (int x = 0; x < w; x++) { Seed(inside, reached, stack, x); Seed(inside, reached, stack, (h - 1) * w + x); }
+            for (int y = 0; y < h; y++) { Seed(inside, reached, stack, y * w); Seed(inside, reached, stack, y * w + w - 1); }
             Fill(inside, reached, stack, w, h, null);
             var holes = new bool[w * h];
-            int minArea = Math.Max(16, w * h / 2000);
             var part = new System.Collections.Generic.List<int>();
             for (int i = 0; i < holes.Length; i++)
             {
                 if (inside[i] || reached[i]) continue;
                 part.Clear();
-                stack.Push(i);
+                Seed(inside, reached, stack, i);
                 Fill(inside, reached, stack, w, h, part);
                 if (part.Count >= minArea) foreach (int j in part) holes[j] = true;
             }
             return holes;
+        }
+
+        // 還沒走過的空白：標記、放進堆疊（放進去時就標記，堆疊才不會比像素數多）
+        static void Seed(bool[] inside, bool[] reached, System.Collections.Generic.Stack<int> stack, int i)
+        {
+            if (reached[i] || inside[i]) return;
+            reached[i] = true;
+            stack.Push(i);
         }
 
         // 從 stack 裡的點往八個方向填字外面的空白（填到的記在 reached；part 不是 null 就順便記下這一塊有哪些點）
@@ -292,15 +320,13 @@ namespace VideoWallpaper
             while (stack.Count > 0)
             {
                 int i = stack.Pop();
-                if (reached[i] || inside[i]) continue;
-                reached[i] = true;
                 if (part != null) part.Add(i);
                 int x = i % w, y = i / w;
                 for (int dy = -1; dy <= 1; dy++)
                     for (int dx = -1; dx <= 1; dx++)
                     {
                         int nx = x + dx, ny = y + dy;
-                        if ((dx != 0 || dy != 0) && nx >= 0 && nx < w && ny >= 0 && ny < h) stack.Push(ny * w + nx);
+                        if ((dx != 0 || dy != 0) && nx >= 0 && nx < w && ny >= 0 && ny < h) Seed(inside, reached, stack, ny * w + nx);
                     }
             }
         }

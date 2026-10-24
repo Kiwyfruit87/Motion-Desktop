@@ -58,7 +58,7 @@ namespace VideoWallpaper
         [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
         [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
         [DllImport("user32.dll")] public static extern IntPtr SetCursor(IntPtr cursor);
-        [DllImport("user32.dll")] public static extern IntPtr LoadCursor(IntPtr instance, int id);
+        [DllImport("user32.dll")] public static extern IntPtr LoadCursor(IntPtr instance, IntPtr id);
         [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
         [DllImport("user32.dll")] public static extern IntPtr SetCapture(IntPtr hWnd);
         [DllImport("user32.dll")] public static extern bool ReleaseCapture();

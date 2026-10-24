@@ -603,9 +603,8 @@ float4 TextGlass(float4 pos : SV_Position) : SV_Target
         readonly Shape[] textShape = new Shape[1];
 
         // 32 位元浮點數換成 16 位元（超過範圍的夾到 ±65504；距離圖的值不會小到需要次正規數，直接當 0）
-        static ushort Half(float f)
+        static ushort Half(int bits)
         {
-            int bits = BitConverter.ToInt32(BitConverter.GetBytes(f), 0);
             int sign = (bits >> 16) & 0x8000, exp = ((bits >> 23) & 0xff) - 127 + 15, mant = bits & 0x7fffff;
             if (exp <= 0) return (ushort)sign;
             if (exp >= 31) return (ushort)(sign | 0x7bff);
@@ -617,9 +616,11 @@ float4 TextGlass(float4 pos : SV_Position) : SV_Target
         public bool CreateField(float[] data, int w, int h, out IntPtr texture, out IntPtr view)
         {
             texture = view = IntPtr.Zero;
-            if (textPs == IntPtr.Zero) return false;
+            if (textPs == IntPtr.Zero || data == null || data.Length < w * h * 4) return false;
+            var bits = new int[data.Length];   // 一次把浮點數的位元複製出來（逐個用 BitConverter 會配置幾百萬個小陣列）
+            Buffer.BlockCopy(data, 0, bits, 0, data.Length * 4);
             var half = new ushort[data.Length];
-            for (int i = 0; i < data.Length; i++) half[i] = Half(data[i]);
+            for (int i = 0; i < bits.Length; i++) half[i] = Half(bits[i]);
             var desc = new Texture2DDesc { Width = (uint)w, Height = (uint)h, MipLevels = 1, ArraySize = 1, Format = 10 /* R16G16B16A16_FLOAT */, SampleCount = 1, BindFlags = 0x8 };
             if (createTexture(device, ref desc, IntPtr.Zero, out texture) < 0) { texture = IntPtr.Zero; return false; }
             updateHalf(context, texture, 0, IntPtr.Zero, half, (uint)(w * 8), 0);

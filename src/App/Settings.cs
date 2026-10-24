@@ -41,12 +41,12 @@ namespace VideoWallpaper
                     int eq = line.IndexOf('=');
                     if (eq <= 0) continue;
                     string key = line.Substring(0, eq).Trim(), value = line.Substring(eq + 1).Trim();
-                    if (key == "video") s.VideoPath = value;
+                    if (key == "video") { try { s.VideoPath = value.Length > 0 ? Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, value)) : value; } catch { s.VideoPath = value; } }   // 手改成相對路徑也能用（以程式所在的資料夾為準，開機自動啟動時目前的資料夾不一定是它）
                     else if (key == "muted") s.Muted = value == "1";
                     else if (key == "autopause") s.AutoPause = value == "1";
                     else if (key == "taskbarfix") s.TaskbarFix = value == "1";
                     else if (key == "beatglow") s.BeatGlow = value == "1";
-                    else if (key == "stretch") { Stretch st; if (Enum.TryParse(value, out st)) s.Stretch = st; }
+                    else if (key == "stretch") { Stretch st; if (Enum.TryParse(value, out st) && Enum.IsDefined(typeof(Stretch), st)) s.Stretch = st; }
                     else if (key == "weatherlocation") s.WeatherLocation = value;
                 }
             }
@@ -58,7 +58,9 @@ namespace VideoWallpaper
         {
             try
             {
-                File.WriteAllLines(FilePath, new[] {
+                // 先寫到暫存檔再換掉（寫到一半被中斷，原本的設定還在）
+                string temp = FilePath + ".tmp";
+                File.WriteAllLines(temp, new[] {
                     "video=" + VideoPath,
                     "muted=" + (Muted ? "1" : "0"),
                     "autopause=" + (AutoPause ? "1" : "0"),
@@ -67,6 +69,8 @@ namespace VideoWallpaper
                     "stretch=" + Stretch,
                     "weatherlocation=" + WeatherLocation,
                 }, Encoding.UTF8);
+                if (File.Exists(FilePath)) File.Replace(temp, FilePath, null);
+                else File.Move(temp, FilePath);
             }
             catch { }
         }

@@ -138,6 +138,7 @@ namespace VideoWallpaper
                     double x = 0;
                     for (int c = 0; c < channels; c++) x += samples[f * channels + c];
                     x /= channels;
+                    if (double.IsNaN(x) || double.IsInfinity(x)) x = 0;   // 驅動偶爾送來壞值：當成靜音，濾波器的狀態才不會永久變成 NaN
                     mixSum += x * x;
                     double y = low2.Run(low1.Run(x));
                     sum += y * y;

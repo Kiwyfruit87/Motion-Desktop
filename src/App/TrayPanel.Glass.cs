@@ -273,11 +273,13 @@ namespace VideoWallpaper
             if (drop.Step(content, now, dt))
             {
                 drop.Mark(content);
-                // 按住時整個分段控制變寬、變亮約 +11/255（官方實測寬 14.6；分區的邊距只有 5，最多每邊 5）
+                // 按住時整個軌道變大（實機約 4%：寬每邊多 6、高多 4%）、變亮約 +15/255（亮度比大小先到、放開時退得慢）
                 var back = (ScaleTransform)segmentBack.RenderTransform;
-                double wide = segmentBack.ActualWidth > 0 ? (segmentBack.ActualWidth + 10 * drop.Lift) / segmentBack.ActualWidth : 1;
+                double wide = segmentBack.ActualWidth > 0 ? (segmentBack.ActualWidth + 12 * drop.Lift) / segmentBack.ActualWidth : 1;
+                double tall = 1 + 0.04 * drop.Lift;
                 if (back.ScaleX != wide) back.ScaleX = wide;
-                double shine = 0.043 * drop.Lift;
+                if (back.ScaleY != tall) back.ScaleY = tall;
+                double shine = 0.06 * drop.Shine;
                 if (segmentShine.Opacity != shine) segmentShine.Opacity = shine;
                 drop.Place(content, glass != null);
                 if (glass != null && drop.Lifted && upper.Count < GlassBackdrop.MaxShapes) { var s = pool[used++]; drop.Shape(s, shown); upper.Add(s); }
@@ -351,7 +353,8 @@ namespace VideoWallpaper
                     // 按在選取的那一格：馬上浮起成透鏡、跟著手指；按在別格：放開才切過去（中途拖了也會浮起來跟著手指）
                     dropHeld = true;
                     drop.Dragging = drop.Nearest(content, p.X) == drop.Selected;
-                    drop.DragRaw = p.X; drop.DragX = DropClamp(p.X); drop.Tapping = false;
+                    drop.DragRaw = p.X; drop.DragX = DropClamp(p.X); drop.Tapping = false; drop.Released = false;
+                    fingerV = 0; dragAt = clock.Elapsed.TotalSeconds;
                     glowOn = segmentBack;
                     glowDrop = true;
                     content.CaptureMouse();
@@ -369,6 +372,8 @@ namespace VideoWallpaper
             }
         }
 
+        double fingerV, dragAt;   // 拖分段時手指的速度（平滑過）和上次移動的時間
+
         double DropClamp(double x)
         {
             return Math.Min(Math.Max(x, drop.CenterOf(content, 0)), drop.CenterOf(content, drop.Items.Length - 1));
@@ -384,6 +389,9 @@ namespace VideoWallpaper
             if (dropHeld)
             {
                 if (moved) drop.Dragging = true;
+                // 手指的速度（放開時往前推 0.1 秒選格子，甩一下才會選到甩去的那格）
+                double t = clock.Elapsed.TotalSeconds, gap = t - dragAt;
+                if (gap > 0.004) { fingerV += (Math.Min(1, gap / 0.05)) * ((p.X - drop.DragRaw) / gap - fingerV); dragAt = t; }
                 drop.DragRaw = p.X; drop.DragX = DropClamp(p.X);
             }
         }
@@ -411,8 +419,10 @@ namespace VideoWallpaper
             }
             if (dropHeld)
             {
-                int best = drop.Nearest(content, drop.Dragging ? drop.DragRaw : downAt.X);   // 選離手指最近的那一格
-                if (act && (moved || best != drop.Selected)) drop.Tapping = true;   // 點別格 / 拖完放開：抬起著滑過去，快到了才落下
+                // 選離「手指 + 0.1 秒的慣性」最近的那一格（停下來放開時就是手指的位置；手指停了很久速度不算）
+                double v = clock.Elapsed.TotalSeconds - dragAt < 0.08 ? fingerV : 0;
+                int best = drop.Nearest(content, drop.Dragging ? drop.DragRaw + 0.1 * v : downAt.X);
+                if (act && (moved || best != drop.Selected)) { drop.Tapping = true; drop.Released = drop.Dragging; }   // 點別格 / 拖完放開：抬起著滑過去，過一下就落下
                 drop.Dragging = false;
                 if (act) drop.Items[best].IsChecked = true;
             }

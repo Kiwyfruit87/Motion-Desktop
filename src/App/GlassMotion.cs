@@ -203,27 +203,30 @@ namespace VideoWallpaper
         }
     }
 
-    // 分段控制的選取（照 iOS 26 的實測）：平常是畫在字下面的實心膠囊。
-    // 按住選取的那一格：抬起成透明透鏡（寬多 20、高多 8，裡面的字放大 1.2 倍），跟著手指（0.2 秒的彈簧，會落後一點），
-    // 只在第一格到最後一格之間；放開選離手指最近的那一格，從透鏡現在的位置和速度滑過去（0.40 / 0.85）。
-    // 點別格：抬起和移動同時開始、沒有延遲；移動中拉長、到站壓扁；離目標不到 3.5 就開始落下，實心慢慢回來
+    // 分段控制的選取（照 iOS 26 健身 App 分頁列的錄影，五個子代理逐格量的）：平常是畫在字下面的實心膠囊。
+    // 按住選取的那一格：抬起成透明透鏡（寬 1.23 倍、高 1.35 倍，上下超出軌道一點；裡面的字放大 1.2 倍），
+    //   抬起用 0.2 秒、會衝過頭約 6% 的彈簧；跟著手指（0.25 秒的彈簧，不回彈），兩端可以超出約格距的 15%（越拉越緊）；
+    // 快速拖曳時變形，跟方向有關：往右扁寬、往左高窄，停下時反過來晃一下再平復（約 0.5 秒）；
+    // 放開：選「手指位置 + 0.1 秒的慣性」最近的那一格，從透鏡現在的位置和速度滑過去（0.38 / 0.78，會稍微衝過頭），
+    //   放開後約 0.07 秒就開始落回實心；點別格：抬起和移動同時開始（0.36 / 0.9），約 0.2 秒後開始落回（跟距離無關）
     class GlassDrop
     {
         public readonly FrameworkElement Host;
         public readonly RadioButton[] Items;
         public FrameworkElement Visual;   // 實心的那塊（WPF 畫在字的下面）
         public FrameworkElement Solid;
-        readonly Spring pos = new Spring(), lift = new Spring(), solid = new Spring(), rub = new Spring();
-        readonly GlassStretch stretch = new GlassStretch();
-        public bool Dragging, Tapping;
+        readonly Spring pos = new Spring(), lift = new Spring(), solid = new Spring(), rub = new Spring(), shine = new Spring(), wobble = new Spring();
+        public bool Dragging, Tapping, Released;   // Released：這次的 Tapping 是拖完放開（不是點別格）
+        double tapAt = -1;
         public double DragRaw, DragX;
-        public double X, Y, W, H, SolidAmount, Mag, Lift;
+        public double X, Y, W, H, SolidAmount, Mag, Lift, Shine;
         public int Selected;
 
         public GlassDrop(FrameworkElement host, RadioButton[] items) { Host = host; Items = items; }
 
         public double CenterOf(Visual root, int i) { return Motion.Center(Items[i], root, true).X; }
         public double Half { get { return Items[0].ActualWidth / 2; } }
+        public double Spacing(Visual root) { return Items.Length > 1 ? CenterOf(root, 1) - CenterOf(root, 0) : Half * 2; }
 
         public int Nearest(Visual root, double x)
         {
@@ -236,23 +239,31 @@ namespace VideoWallpaper
         {
             if (!Host.IsVisible || Host.ActualWidth <= 0) return false;
             for (int i = 0; i < Items.Length; i++) if (Items[i].IsChecked == true) Selected = i;
-            double half = Half, hh = Items[0].ActualHeight / 2;   // 用格子的高度（不能用 Host：選取塊變大會撐大它）；四周都內縮 3
+            double half = Half, hh = Items[0].ActualHeight / 2;   // 用格子的高度（不能用 Host：選取塊變大會撐大它）
             double goal = Dragging ? DragX : CenterOf(root, Selected);
-            pos.Step(goal, Dragging ? 0.196 : 0.40, Dragging ? 0.90 : 0.85, dt);
-            if (Tapping && Math.Abs(goal - pos.X) <= 3.5) Tapping = false;   // 快到了：開始落下
+            pos.Step(goal, Dragging ? 0.25 : Released ? 0.38 : 0.36, Dragging ? 0.9 : Released ? 0.78 : 0.9, dt);
+            // 落回實心：照時間（放開後 0.07 秒、點別格 0.2 秒），不等滑到
+            if (Tapping) { if (tapAt < 0) tapAt = now; if (now - tapAt >= (Released ? 0.07 : 0.2)) Tapping = false; }
+            else tapAt = -1;
             bool up = Dragging || Tapping;
-            lift.Step(up ? 1 : 0, 0.25, 1, dt);
-            solid.Step(up ? 0 : 1, up ? 0.25 : 0.40, 1, dt);
-            double l = Motion.Clamp01(lift.X);
-            // 拖過頭：可以超出最後一格一點點（約透鏡高的 1/10），越拉越拉不動，到底時壓扁（寬少、高多）
-            double r = Motion.Rubber(rub, Dragging ? DragRaw - DragX : 0, 8, Dragging, dt), squeeze = Math.Abs(r) / 4.8;
-            stretch.Step(pos.V, dt);
+            lift.Step(up ? 1 : 0, 0.2, 0.7, dt);
+            solid.Step(up ? 0 : 1, up ? 0.12 : 0.2, 1, dt);
+            shine.Step(up ? 1 : 0, up ? 0.12 : 0.35, 1, dt);   // 軌道變亮：比大小先到、放開時退得慢
+            double l = Math.Max(0, lift.X);
+            // 拖過頭：可以超出盡頭約格距的 15%，越拉越拉不動；到底時變高變窄
+            double spacing = Spacing(root);
+            double r = Motion.Rubber(rub, Dragging ? DragRaw - DragX : 0, 0.25 * spacing, Dragging, dt);
+            double squeeze = Math.Min(1, Math.Abs(r) / Math.Max(1, 0.15 * spacing));
+            // 變形：速度先過一顆會晃的彈簧（0.54 秒、阻尼 0.5），往右是正的：扁寬；往左、或往右停下時晃過頭：高窄
+            double v = Math.Tanh(wobble.Step(pos.V, 0.54, 0.5, dt) / 600) * Motion.Clamp01(l);
+            double sx = v >= 0 ? 1 + 0.10 * v : 1 + 0.09 * v, sy = v >= 0 ? 1 - 0.18 * v : 1 - 0.13 * v;
             var c = Motion.Center(Host, root, true);
             X = pos.X + r; Y = c.Y;
-            W = (half + 10 * l) * stretch.X * (1 - 0.2 * squeeze);
-            H = (hh + 4 * l) * stretch.Y * (1 + 0.2 * squeeze);   // 只比軌道高一點（實機：上下各超出約 6%）
-            Mag = 1 + 0.2 * l;   // 透鏡底下放大 1.2 倍（實機）；放大用 Catmull-Rom 取樣，字才不會粗糙
+            W = half * (1 + 0.23 * l) * sx * (1 - 0.1 * squeeze);
+            H = hh * (1 + 0.35 * l) * sy * (1 + 0.1 * squeeze);
+            Mag = 1 + 0.2 * Motion.Clamp01(l);   // 透鏡底下放大 1.2 倍（實機）；放大用 Catmull-Rom 取樣，字才不會粗糙
             Lift = l;
+            Shine = Motion.Clamp01(shine.X);
             SolidAmount = Motion.Clamp01(solid.X);
             return true;
         }
@@ -271,14 +282,28 @@ namespace VideoWallpaper
 
         public bool Lifted { get { return SolidAmount < 0.999; } }
 
-        // 選取的樣子（字變粗）跟著透鏡走：拖曳中透鏡蓋到哪一格就是哪一格，平常是選到的那一格。
+        // 選取的樣子跟著透鏡走：字變粗的是透鏡最靠近的那一格（平常是選到的那一格）；
+        // 抬起時透鏡蓋到多少，字就染上多少強調色（像 iPhone 分頁列：透鏡蓋到哪裡、哪裡就是選取的顏色）
         public void Mark(Visual root)
         {
             int at = Dragging || Tapping ? Nearest(root, X) : Selected;
+            Color text = Colors.White, accent = Colors.White;
+            var tb = Items[0].TryFindResource("TextPrimary") as SolidColorBrush;
+            var ab = Items[0].TryFindResource("Accent") as SolidColorBrush;
+            if (tb != null) text = tb.Color;
+            if (ab != null) accent = ab.Color;
             for (int i = 0; i < Items.Length; i++)
             {
                 var weight = i == at ? FontWeights.SemiBold : FontWeights.Normal;
                 if (Items[i].FontWeight != weight) Items[i].FontWeight = weight;
+                double cx = CenterOf(root, i), half = Items[i].ActualWidth / 2;
+                double cover = half <= 0 ? 0 : Motion.Clamp01((Math.Min(cx + half, X + W) - Math.Max(cx - half, X - W)) / (2 * half));
+                double k = cover * (1 - SolidAmount);
+                if (k < 0.01) { if (Items[i].ReadLocalValue(Control.ForegroundProperty) != DependencyProperty.UnsetValue) Items[i].ClearValue(Control.ForegroundProperty); continue; }
+                var color = Color.FromArgb((byte)(text.A + (accent.A - text.A) * k), (byte)(text.R + (accent.R - text.R) * k),
+                    (byte)(text.G + (accent.G - text.G) * k), (byte)(text.B + (accent.B - text.B) * k));
+                var now = Items[i].Foreground as SolidColorBrush;
+                if (now == null || now.Color != color) Items[i].Foreground = new SolidColorBrush(color);
             }
         }
 

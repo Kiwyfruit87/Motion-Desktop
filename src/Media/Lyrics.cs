@@ -22,6 +22,7 @@ namespace VideoWallpaper
             // 整首歌畫好的長圖（查到歌詞後在背景先畫好，按下歌詞按鈕就能馬上淡入）；還沒畫好是 null
             public int[] Sheet;
             public int SheetWidth, SheetHeight, SheetFor;   // SheetFor：照多高的螢幕畫的
+            public int SheetFailedFor;                      // 照這個螢幕高度畫長圖失敗過（太長、記憶體不夠）：不再重畫，這首就不顯示歌詞
             public double[] Centers, Heights;   // 每一行在長圖上的中心高度、行高
             public double Spacing;
         }
@@ -47,7 +48,7 @@ namespace VideoWallpaper
             lock (gate)
             {
                 bool have = cache.TryGetValue(key, out cached) && !(cached.Failed && (DateTime.UtcNow - cached.When).TotalSeconds > 60);
-                if (have && (!Has(cached) || SheetReady(cached, screenHeight))) return cached;
+                if (have && (!Has(cached) || SheetReady(cached, screenHeight) || cached.SheetFailedFor == screenHeight)) return cached;
                 if (loading.Contains(key)) return have ? cached : null;
                 loading.Add(key);
                 if (!have) cached = null;
@@ -108,7 +109,7 @@ namespace VideoWallpaper
                         while (sheets.Count > 3) { sheets[0].Sheet = null; sheets.RemoveAt(0); }
                     }
                 }
-                catch { }
+                catch { lock (gate) r.SheetFailedFor = screenHeight; }   // 畫不出來：記下來，之後不再重畫（不然每次重整都會再畫一次）
                 finally { Dispatcher.CurrentDispatcher.InvokeShutdown(); }
             });
             thread.SetApartmentState(ApartmentState.STA);

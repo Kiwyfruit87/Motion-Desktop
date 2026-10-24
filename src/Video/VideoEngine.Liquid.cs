@@ -214,13 +214,14 @@ namespace VideoWallpaper
         // 鎖定畫面的時鐘：solid 是實心的字、field 是字形距離圖（兩張一樣大，貼在 (x, y)；scale 以 1080p 為 1）。
         // 兩樣一起換（換分鐘時不會有一格是新的字配舊的玻璃）。畫得出玻璃時，實心字（clockDigits）就不畫；field 是 null 只用實心字。
         // slots 不是 null：換分鐘的動畫（見 LockClock.ClockSlots），舊的距離圖留著畫離開的字；timeTop、digitY、digitH 是時間那一行的上緣、數字的中心和高度
+        // sameTime：時間沒變（只有日期、天氣變了）——正在跑的換分鐘動畫留著，不要切掉
         public void SetClock(IntPtr hwnd, int[] solid, float[] field, int width, int height, int x, int y, double scale,
-            float[] slots, float timeTop, float digitY, float digitH)
+            float[] slots, float timeTop, float digitY, float digitH, bool sameTime)
         {
             WithTarget(hwnd, delegate(Target t, long now)
             {
                 Replace(t, "clockDigits", solid == null ? null : CreateOverlay(t, solid, width, height, x, y));
-                FreeClockOld(t);
+                if (!sameTime || field == null) FreeClockOld(t);
                 if (slots != null && t.ClockView != IntPtr.Zero && field != null)
                 {
                     // 現在這張變成「舊的」，畫離開的字
@@ -265,22 +266,30 @@ namespace VideoWallpaper
         bool DrawClockGlass(Target t, long now)
         {
             t.ClockGlassOn = false;
-            if (t.ClockField == null || !LiquidViews(t)) { FreeClockOld(t); return false; }
+            if (t.ClockField == null) { FreeClockOld(t); return false; }
+            if (!LiquidViews(t)) return false;   // 暫時畫不了（影片還沒第一格）：等著，換分鐘的動畫留著
             if (clockLiquid == null && !clockTried)
             {
                 clockTried = true;
                 clockLiquid = LiquidGlass.Create(device, context, featureLevel);
             }
-            if (clockLiquid == null) return false;
-            if (t.ClockFieldFailed) return false;   // 這張距離圖放不上顯示卡：等下一分鐘換圖再試，不要每一格都重試
-            if (t.ClockView == IntPtr.Zero && !clockLiquid.CreateField(t.ClockField, t.ClockW, t.ClockH, out t.ClockTexture, out t.ClockView)) { t.ClockFieldFailed = true; return false; }
+            if (clockLiquid == null) { FreeClockOld(t); return false; }
+            if (t.ClockFieldFailed) { FreeClockOld(t); return false; }   // 這張距離圖放不上顯示卡：等下一分鐘換圖再試，不要每一格都重試
+            if (t.ClockView == IntPtr.Zero && !clockLiquid.CreateField(t.ClockField, t.ClockW, t.ClockH, out t.ClockTexture, out t.ClockView)) { t.ClockFieldFailed = true; FreeClockOld(t); return false; }
             bool animating = ClockAnim(t, now);
             double s = t.ClockScale;
             // 模糊的範圍：時鐘那張圖加上四周（邊緣往字裡面取樣最多 16；圖本身四周也留了 30）；要畫的範圍就是那張圖（四周已經留了影子的空間）
             int margin = (int)Math.Ceiling(56 * s);
+            // 換分鐘的動畫中：新舊兩張圖的聯集（12:59 → 1:00 新的比較窄，舊的字在新圖外面還要畫）
+            int cx0 = t.ClockX, cy0 = t.ClockY, cx1 = t.ClockX + t.ClockW, cy1 = t.ClockY + t.ClockH;
+            if (animating)
+            {
+                cx0 = Math.Min(cx0, t.ClockOldX); cy0 = Math.Min(cy0, t.ClockOldY);
+                cx1 = Math.Max(cx1, t.ClockOldX + t.ClockOldW); cy1 = Math.Max(cy1, t.ClockOldY + t.ClockOldH);
+            }
             int bx, by, bw, bh, ex, ey, ew, eh;
-            Clip(t, t.ClockX - margin, t.ClockY - margin, t.ClockW + 2 * margin, t.ClockH + 2 * margin, out bx, out by, out bw, out bh);
-            Clip(t, t.ClockX, t.ClockY, t.ClockW, t.ClockH, out ex, out ey, out ew, out eh);
+            Clip(t, cx0 - margin, cy0 - margin, cx1 - cx0 + 2 * margin, cy1 - cy0 + 2 * margin, out bx, out by, out bw, out bh);
+            Clip(t, cx0, cy0, cx1 - cx0, cy1 - cy0, out ex, out ey, out ew, out eh);
             if (bw <= 0 || bh <= 0 || ew <= 0 || eh <= 0) return animating;
             bool reblur = t.FreshVideo && now - t.ClockBlurredAt >= 33 || bx != t.ClockBlurX || by != t.ClockBlurY || bw != t.ClockBlurW || bh != t.ClockBlurH;
             if (reblur) { t.ClockBlurredAt = now; t.ClockBlurX = bx; t.ClockBlurY = by; t.ClockBlurW = bw; t.ClockBlurH = bh; }
@@ -299,7 +308,7 @@ namespace VideoWallpaper
             if (t.ClockSlots == null || t.ClockOldView == IntPtr.Zero) return false;
             double time = (now - t.ClockAnimStart) / 1000.0;
             const double OldTime = 0.06, NewDelay = 0.03, NewTime = 0.56, SlideTau = 0.125;
-            int n = t.ClockSlots.Length / 8;
+            int n = Math.Min(10, t.ClockSlots.Length / 8);   // cbuffer 只放得下 10 格
             double end = 0.8;
             for (int i = 0; i < n; i++) end = Math.Max(end, t.ClockSlots[i * 8 + 5] + (NewDelay + NewTime) * t.ClockSlots[i * 8 + 7] + 0.05);
             if (time > end) { FreeClockOld(t); return false; }

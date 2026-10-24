@@ -27,9 +27,14 @@ namespace VideoWallpaper
         static void Watch()
         {
             bool logged = false;
+            int last = Environment.TickCount;
             while (true)
             {
                 Thread.Sleep(1000);
+                int now = Environment.TickCount;
+                // 這一秒睡了超過 3 秒：電腦剛從睡眠醒來（或整台機器卡住），不是畫面執行緒的問題，從現在重新算
+                if (now - last > 3000) answeredAt = now;
+                last = now;
                 ui.BeginInvoke(new Action(() => answeredAt = Environment.TickCount), DispatcherPriority.Send);
                 int silent = Environment.TickCount - answeredAt;
                 if (silent < Limit) { logged = false; continue; }

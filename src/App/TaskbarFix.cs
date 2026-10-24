@@ -102,16 +102,26 @@ namespace VideoWallpaper
 
             // 最上面第二排（第一排可能是工作列上緣的細線）
             IntPtr screen = Native.GetDC(IntPtr.Zero), mem = Native.CreateCompatibleDC(screen), bits;
-            var info = new Native.BITMAPINFOHEADER { biSize = 40, biWidth = width, biHeight = 1, biPlanes = 1, biBitCount = 32 };
-            IntPtr dib = Native.CreateDIBSection(screen, ref info, 0, out bits, IntPtr.Zero, 0);
-            IntPtr old = Native.SelectObject(mem, dib);
             var pixels = new int[width];
-            bool ok = Native.BitBlt(mem, 0, 0, width, 1, screen, r.Left, r.Top + 1, SRCCOPY);
-            if (ok) Marshal.Copy(bits, pixels, 0, width);
-            Native.SelectObject(mem, old);
-            Native.DeleteObject(dib);
-            Native.DeleteDC(mem);
-            Native.ReleaseDC(IntPtr.Zero, screen);
+            bool ok = false;
+            try
+            {
+                var info = new Native.BITMAPINFOHEADER { biSize = 40, biWidth = width, biHeight = 1, biPlanes = 1, biBitCount = 32 };
+                IntPtr dib = Native.CreateDIBSection(screen, ref info, 0, out bits, IntPtr.Zero, 0);
+                if (dib != IntPtr.Zero && bits != IntPtr.Zero)
+                {
+                    IntPtr old = Native.SelectObject(mem, dib);
+                    ok = Native.BitBlt(mem, 0, 0, width, 1, screen, r.Left, r.Top + 1, SRCCOPY);
+                    if (ok) Marshal.Copy(bits, pixels, 0, width);
+                    Native.SelectObject(mem, old);
+                }
+                if (dib != IntPtr.Zero) Native.DeleteObject(dib);
+            }
+            finally
+            {
+                Native.DeleteDC(mem);
+                Native.ReleaseDC(IntPtr.Zero, screen);
+            }
             if (!ok) return false;
 
             int black = 0;

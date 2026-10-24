@@ -22,7 +22,9 @@ namespace VideoWallpaper
         LockClock.MusicCard card;    // 卡片目前的樣子和位置
         DispatcherTimer clockTimer;
         string shownClock, shownMusic;
-        LockClock.ClockImage lastClock;   // 上次畫的時鐘（換分鐘的動畫從它開始；收起來時清掉，下次打開不播動畫）
+        LockClock.ClockImage lastClock;   // 上次畫的時鐘（只留時間和每個字的位置；換分鐘的動畫從它開始；收起來時清掉，下次打開不播動畫）
+        VideoEngine clockEngine;          // 時鐘交給了哪個播放引擎（換了引擎要重畫）
+        int clockGen;                     // 背景算距離圖時又有更新的時鐘：舊的算完不用
         string shownSong;            // 卡片上目前顯示的是哪首歌（換歌時封面和文字要翻頁）
         double shownMicLevel = -1;   // 歌詞按鈕現在的亮度
         bool shownPlaying;           // 播放鍵現在畫的是暫停（播放中）嗎
@@ -173,18 +175,36 @@ namespace VideoWallpaper
             lyrics.Update();
         }
 
-        // 左下角的時鐘和天氣：時間或天氣變了才重畫
+        // 上方的時鐘、日期和天氣：時間、日期、天氣變了才重畫（或換了播放引擎）。歌詞查完、天氣回來的整個重整不重畫時鐘
+        // （字形距離圖在 4K 上要零點幾秒，也會把正在跑的換分鐘動畫切掉）。
+        // 字的形狀在畫面執行緒畫好，距離圖在背景算完再交給引擎；剛打開時直接算（時鐘才不會晚一下才出現）
         void ShowClock(bool force)
         {
             var now = DateTime.Now;
             string clockKey = LockClock.ClockKey(now);
-            if (!force && clockKey == shownClock) return;
+            if (clockKey == shownClock && engine == clockEngine) return;
             shownClock = clockKey;
+            clockEngine = engine;
             var clock = LockClock.RenderClock(now, primary.Bounds.Width, primary.Bounds.Height);
-            // 時間的數字：引擎畫得出液態玻璃就畫玻璃，畫不了才用實心字；換分鐘時變了的字有動畫（剛打開時沒有）
+            int gen = ++clockGen;
+            if (lastClock == null) { LockClock.ComputeField(clock); SendClock(clock); return; }
+            var ui = Dispatcher.CurrentDispatcher;
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                try { LockClock.ComputeField(clock); } catch { clock.Field = null; clock.Shape = null; }   // 算不出來：只用實心字
+                ui.BeginInvoke(new Action(delegate { if (Active && gen == clockGen && engine != null) SendClock(clock); }));
+            });
+        }
+
+        // 時鐘交給引擎（時間的數字：畫得出液態玻璃就畫玻璃，畫不了才用實心字）；換分鐘時變了的字有動畫，
+        // 時間沒變（只有天氣、日期變）時正在跑的動畫留著
+        void SendClock(LockClock.ClockImage clock)
+        {
+            bool sameTime = lastClock != null && lastClock.Time == clock.Time;
             engine.SetClock(primary.Handle, clock.Solid, clock.Field, clock.Width, clock.Height, clock.X, clock.Y, clock.Scale,
-                LockClock.ClockSlots(lastClock, clock), clock.TimeTop, clock.DigitCenterY, clock.DigitHeight);
-            lastClock = clock;
+                LockClock.ClockSlots(lastClock, clock), clock.TimeTop, clock.DigitCenterY, clock.DigitHeight, sameTime);
+            // 下次換分鐘只需要時間和每個字的位置（整張圖留著太佔記憶體）
+            lastClock = new LockClock.ClockImage { Time = clock.Time, CharX = clock.CharX };
         }
 
         // 右下角的音樂卡片：換歌、播放或暫停、封面變了才整張重畫；沒在播就拿掉。
@@ -472,6 +492,7 @@ namespace VideoWallpaper
             busy = false;
             if (clockTimer != null) clockTimer.Stop();
             lastClock = null;
+            clockEngine = null; shownClock = null; clockGen++;
             lyrics.Close();
             shownSong = null;   // 下次打開時卡片直接出現，不播換歌動畫
             shownMicLevel = -1;

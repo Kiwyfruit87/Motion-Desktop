@@ -295,7 +295,9 @@ namespace VideoWallpaper
             int width = pts[1].X - pts[0].X, height = pts[1].Y - pts[0].Y;
 
             var container = new ContainerWindow(host.Parent, pts[0].X, pts[0].Y, width, height, host.Raised);
-            var video = new VideoWindow(container.Handle, width, height);
+            VideoWindow video;
+            try { video = new VideoWindow(container.Handle, width, height); }
+            catch { container.DestroyHandle(); throw; }   // 建不起來：外層視窗也收掉（不然每次重試都多留一個黑塊）
             video.Exposed = delegate { if (engine != null) engine.RequestRedraw(); };
 
             return new ScreenPlayer

@@ -43,7 +43,7 @@ namespace VideoWallpaper
         public static bool CursorShown;
         public static DateTime LastMove;
         static Native.POINT lastPos;
-        static readonly IntPtr Arrow = Native.LoadCursor(IntPtr.Zero, 32512);
+        static readonly IntPtr Arrow = Native.LoadCursor(IntPtr.Zero, new IntPtr(32512));
 
         public static void ResetCursor()
         {
