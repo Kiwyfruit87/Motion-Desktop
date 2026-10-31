@@ -40,10 +40,11 @@ namespace VideoWallpaper
             // ScatterRim 是靠邊那一圈（沒有字的地方，透明一點、折射看得清楚）。卡片的散射是四段：0 清楚、1/3 微糊、2/3 輕模糊、1 重模糊
             public float ScatterBusy, ScatterRim;
 
-            // 第二層（卡片上的小玻璃圓鈕）：底下已經是玻璃了，不再糊、不加白霧，跟旁邊的也不黏在一起
+            // 第二層（卡片上的小玻璃圓鈕）：底下已經是玻璃了，不再糊、不加白霧，跟旁邊的也不黏在一起；
+            // 折射輕一點（0.3）：圓鈕只有 14 像素，折射帶不到 2 像素寬，位移太大會把圓的抗鋸齒邊壓到不到半個像素，邊緣變成一格一格的
             public static Look OnTop(float scale)
             {
-                return new Look { Scale = scale, Scatter = 0, Sat = 1.05f, TintAmt = 0, Legible = 0, Merge = 0 };
+                return new Look { Scale = scale, Scatter = 0, Sat = 1.05f, TintAmt = 0, Legible = 0, Merge = 0, Refract = 0.3f };
             }
         }
 
