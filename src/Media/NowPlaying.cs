@@ -9,7 +9,7 @@ using System.Windows.Threading;
 
 namespace VideoWallpaper
 {
-    // 正在播放的歌（Spotify、瀏覽器裡的 YouTube Music 等）：透過 Windows 的「系統媒體控制」讀取（跟音量浮動視窗上的歌名是同一份資料）。
+    // 正在播放的歌（只看音樂串流平台：Spotify、Apple Music、YouTube Music 等，見 MusicKind）：透過 Windows 的「系統媒體控制」讀取（跟音量浮動視窗上的歌名是同一份資料）。
     // 這些是 WinRT 介面，這裡用的舊版 C# 編譯器沒辦法直接引用（要另外裝 Windows SDK），所以執行時才用反射呼叫。
     static class NowPlaying
     {
@@ -24,6 +24,7 @@ namespace VideoWallpaper
             public bool? Shuffle;                 // 隨機播放開著嗎（null：這個播放器不支援）
             public int? Repeat;                   // 循環：0 關、1 單曲、2 全部（null：不支援；跟 Windows 的 MediaPlaybackAutoRepeatMode 一樣）
             public bool CanSeek = true;           // 播放器接受跳到別的位置嗎（不接受的話進度條不能拖）
+            public bool CanPrev = true, CanNext = true;   // 播放器現在能不能跳上一首 / 下一首（不能的話卡片上的鍵很淡）
             public DateTime Updated;              // 回報位置的時間（UTC）
         }
 
@@ -55,6 +56,52 @@ namespace VideoWallpaper
         static int polling, artTries;
         static string artKey, shownApp;
         static byte[] artCache;
+
+        // 音樂串流平台的程式（應用程式識別碼裡有這些字就算，不分大小寫）：Spotify、Apple Music、iTunes、
+        // YouTube Music（Chrome / Edge 安裝成 App 的、非官方的電腦版）、KKBOX、Amazon Music、Tidal、Deezer、QQ 音樂、SoundCloud、Pandora
+        static readonly string[] MusicApps = { "spotify", "applemusic", "itunes", "cinhimbnkkaeohfgghhklpknlkffjgod", "youtube-music", "youtubemusic",
+            "kkbox", "amazonmusic", "tidal", "deezer", "qqmusic", "soundcloud", "pandora" };
+        // 瀏覽器（Firefox 的識別碼是一串固定的編號）：分不出是哪個網站，所以有專輯的才算——
+        // YouTube Music、Spotify、Apple Music 的網頁版都會給專輯，一般的影片（YouTube、其他網站）沒有
+        static readonly string[] Browsers = { "chrome", "msedge", "308046b0af4a39cb", "firefox", "brave", "opera", "vivaldi", "thebrowsercompany" };
+
+        // 2：音樂串流平台的程式、1：瀏覽器（要再看有沒有專輯）、0：其他（影片播放器、遊戲…不顯示）
+        static int MusicKind(string app)
+        {
+            app = (app ?? "").ToLowerInvariant();
+            if (MusicApps.Any(m => app.Contains(m))) return 2;   // 先看這個：安裝成 App 的 YouTube Music 的識別碼也有「chrome」
+            return Browsers.Any(b => app.Contains(b)) ? 1 : 0;
+        }
+
+        // Spotify 有時候換歌了卻沒告訴 Windows：Windows 那邊一直是上一首的歌名、封面（只有時間軸是新的），重開 Spotify 才會好。
+        // Spotify 自己的視窗標題（播放中是「歌手 - 歌名」，暫停時是「Spotify Premium」之類）一直是對的：
+        // 兩邊對不上就回傳 true，從標題拆出歌名、歌手（歌名可能有「 - 」，所以從第一個拆）
+        static string staleWindow;
+        static DateTime staleSince;
+        static bool StaleSpotify(string app, string title, string artist, out string realTitle, out string realArtist)
+        {
+            realTitle = title; realArtist = artist;
+            if ((app ?? "").IndexOf("spotify", StringComparison.OrdinalIgnoreCase) < 0) return false;
+            string window = null;
+            try
+            {
+                foreach (var p in System.Diagnostics.Process.GetProcessesByName("Spotify"))
+                    using (p)
+                        if (window == null && !string.IsNullOrEmpty(p.MainWindowTitle)) window = p.MainWindowTitle;
+            }
+            catch { }
+            if (window == null) return false;
+            int dash = window.IndexOf(" - ", StringComparison.Ordinal);
+            if (dash <= 0 || window.EndsWith(" - " + title, StringComparison.Ordinal)) { staleWindow = null; return false; }   // 暫停中（看不出是哪首），或是同一首
+            // 平常換歌時兩邊會差一下下才一起更新：對不上超過 2 秒才算
+            if (window != staleWindow) { staleWindow = window; staleSince = DateTime.UtcNow; }
+            if (DateTime.UtcNow - staleSince < TimeSpan.FromSeconds(2)) return false;
+            realArtist = window.Substring(0, dash);
+            realTitle = window.Substring(dash + 3);
+            return true;
+        }
+
+        class Candidate { public object Session; public string App; public int Kind, Score; }
 
         // 開始每秒讀一次；有變化時在 UI 執行緒呼叫 onChanged
         public static void Start(Action onChanged)
@@ -153,14 +200,47 @@ namespace VideoWallpaper
             });
         }
 
+        // 播放器的狀態一變（鍵盤的播放暫停鍵、耳機上的按鍵、在播放器裡按的、換歌），Windows 會通知：馬上讀一次，不用等下一秒的輪詢。
+        // 通知是 WinRT 的事件，這裡的舊版編譯器沒辦法直接寫 +=，用 WindowsRuntimeMarshal 接上（接不上就算了，還有每秒的輪詢）
+        static readonly HashSet<object> watched = new HashSet<object>();   // 已經在聽的（同一個播放器只聽一次）
+        static int pollAgain;   // 讀的途中又有變化：讀完再讀一次
+
+        static void Watch(object target, Type type, params string[] events)
+        {
+            lock (watched) { if (!watched.Add(target)) return; }
+            var notified = typeof(NowPlaying).GetMethod("OnNotified", BindingFlags.NonPublic | BindingFlags.Static);
+            var add = typeof(System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeMarshal).GetMethod("AddEventHandler");
+            var token = typeof(System.Runtime.InteropServices.WindowsRuntime.EventRegistrationToken);
+            foreach (string name in events)
+            {
+                try
+                {
+                    var ev = type.GetEvent(name);
+                    var handler = Delegate.CreateDelegate(ev.EventHandlerType, notified);
+                    var adder = Delegate.CreateDelegate(typeof(Func<,>).MakeGenericType(ev.EventHandlerType, token), target, ev.GetAddMethod());
+                    var remover = Delegate.CreateDelegate(typeof(Action<>).MakeGenericType(token), target, ev.GetRemoveMethod());
+                    add.MakeGenericMethod(ev.EventHandlerType).Invoke(null, new object[] { adder, remover, handler });
+                }
+                catch { }
+            }
+        }
+
+        static void OnNotified(object sender, object args)
+        {
+            lock (gate) if (stopped) return;   // 鎖定畫面收起來了：不用讀
+            Interlocked.Exchange(ref pollAgain, 1);
+            ThreadPool.QueueUserWorkItem(delegate { Poll(); });
+        }
+
         static void Poll()
         {
             if (Interlocked.Exchange(ref polling, 1) == 1) return;
+            Interlocked.Exchange(ref pollAgain, 0);
             try
             {
                 if (!Init()) return;
                 Type rt;
-                // 選要顯示哪個播放器（Spotify、瀏覽器裡的 YouTube Music…）：正在播放的優先；
+                // 選要顯示哪個播放器（只看音樂串流平台，見 MusicKind）：正在播放的優先；
                 // 上次顯示的那個還在就繼續顯示它（同時開好幾個時才不會跳來跳去，都沒在播時也一樣）；都沒有才用 Windows 認定的「目前」那個
                 string currentApp = null;
                 try
@@ -169,17 +249,32 @@ namespace VideoWallpaper
                     if (currentSession != null) currentApp = Get(currentSession, sessionType, "SourceAppUserModelId") as string;
                 }
                 catch { }
-                object found = null;
-                string foundApp = null;
-                int best = -1;
+                var candidates = new List<Candidate>();
                 foreach (object s in (IEnumerable)Call(manager, managerType, "GetSessions", out rt))
                 {
                     string app = Get(s, sessionType, "SourceAppUserModelId") as string ?? "";
+                    Watch(s, sessionType, "PlaybackInfoChanged", "MediaPropertiesChanged", "TimelinePropertiesChanged");   // 播放 / 暫停、換歌、跳轉
+                    int kind = MusicKind(app);
+                    if (kind == 0) continue;
                     bool playing = false;
                     try { playing = Get(Call(s, sessionType, "GetPlaybackInfo", out rt), infoType, "PlaybackStatus").ToString() == "Playing"; }
                     catch { }
-                    int score = (playing ? 4 : 0) + (app == shownApp ? 2 : 0) + (app == currentApp ? 1 : 0);
-                    if (score > best) { best = score; found = s; foundApp = app; }
+                    candidates.Add(new Candidate { Session = s, App = app, Kind = kind, Score = (playing ? 4 : 0) + (app == shownApp ? 2 : 0) + (app == currentApp ? 1 : 0) });
+                }
+                // 分數由高到低一個個看，第一個符合的就用；瀏覽器要讀到歌的資料、有專輯才算（讀到的資料下面直接用）
+                object found = null, props = null;
+                string foundApp = null;
+                foreach (var c in candidates.OrderByDescending(c => c.Score))
+                {
+                    object read = null;
+                    if (c.Kind == 1)
+                    {
+                        try { read = Await(Call(c.Session, sessionType, "TryGetMediaPropertiesAsync", out rt), rt); }
+                        catch { continue; }
+                        if (string.IsNullOrEmpty(Get(read, propsType, "AlbumTitle") as string)) continue;
+                    }
+                    found = c.Session; foundApp = c.App; props = read;
+                    break;
                 }
                 session = found;
                 shownApp = foundApp;
@@ -187,9 +282,13 @@ namespace VideoWallpaper
                 Track track = null;
                 if (found != null)
                 {
-                    object props = Await(Call(found, sessionType, "TryGetMediaPropertiesAsync", out rt), rt);
+                    if (props == null) props = Await(Call(found, sessionType, "TryGetMediaPropertiesAsync", out rt), rt);
                     object info = Call(found, sessionType, "GetPlaybackInfo", out rt);
                     string title = Get(props, propsType, "Title") as string, artist = Get(props, propsType, "Artist") as string ?? "";
+                    string album = Get(props, propsType, "AlbumTitle") as string ?? "";
+                    // Spotify 給 Windows 的還是上一首：歌名、歌手照它的視窗標題，專輯和封面是舊的就不用
+                    bool stale = !string.IsNullOrEmpty(title) && StaleSpotify(foundApp, title, artist, out title, out artist);
+                    if (stale) album = "";
                     if (!string.IsNullOrEmpty(title))
                     {
                         // 換歌後封面有時會晚一點才更新，所以換歌後的前幾次都重新讀一次封面
@@ -201,7 +300,7 @@ namespace VideoWallpaper
                             if (songChanged != null) songChanged();
                         }
                         // 換歌後前 3 次都重新讀封面（有時會晚一點才更新）；還沒讀到的話最多試 10 次
-                        if (artTries < 3 || (artCache == null && artTries < 10))
+                        if (!stale && (artTries < 3 || (artCache == null && artTries < 10)))
                         {
                             artTries++;
                             var art = ReadArt(Get(props, propsType, "Thumbnail"));
@@ -211,11 +310,17 @@ namespace VideoWallpaper
                         // 隨機播放、循環：播放器有提供這個功能（Controls）才算，沒有就是 null（卡片上的按鈕變淡、按了沒反應）
                         bool? shuffle = null;
                         int? repeat = null;
-                        bool canSeek = true;
+                        bool canSeek = true, canPrev = true, canNext = true;
                         try
                         {
                             object controls = Get(info, infoType, "Controls");
                             canSeek = (bool)Get(controls, controlsType, "IsPlaybackPositionEnabled");
+                            try   // 自己一層：讀不到也不影響下面的隨機播放、循環
+                            {
+                                canPrev = (bool)Get(controls, controlsType, "IsPreviousEnabled");
+                                canNext = (bool)Get(controls, controlsType, "IsNextEnabled");
+                            }
+                            catch { canPrev = canNext = true; }
                             if ((bool)Get(controls, controlsType, "IsShuffleEnabled"))
                             {
                                 object v = Get(info, infoType, "IsShuffleActive");
@@ -230,11 +335,12 @@ namespace VideoWallpaper
                         catch { }
                         track = new Track
                         {
-                            Title = title, Artist = artist, Album = Get(props, propsType, "AlbumTitle") as string ?? "", Playing = playing, Art = artCache,
+                            Title = title, Artist = artist, Album = album, Playing = playing, Art = artCache,
                             App = foundApp,
-                            Shuffle = shuffle, Repeat = repeat, CanSeek = canSeek,
-                            Key = songKey + "\n" + playing + "\n" + shuffle + "\n" + repeat + "\n" + (artCache == null ? 0 : artCache.Length) + "\n" + foundApp,
-                            CardKey = songKey + "\n" + (Get(props, propsType, "AlbumTitle") as string ?? "") + "\n" + (artCache == null ? 0 : artCache.Length) + "\n" + foundApp,
+                            Shuffle = shuffle, Repeat = repeat, CanSeek = canSeek, CanPrev = canPrev, CanNext = canNext,
+                            Key = songKey + "\n" + playing + "\n" + shuffle + "\n" + repeat + "\n" + (artCache == null ? 0 : artCache.Length) + "\n" + foundApp
+                                + "\n" + canSeek + canPrev + canNext,
+                            CardKey = songKey + "\n" + album + "\n" + (artCache == null ? 0 : artCache.Length) + "\n" + foundApp,
                         };
                         try
                         {
@@ -257,7 +363,11 @@ namespace VideoWallpaper
                 if (oldKey != (track == null ? null : track.Key) && changed != null) changed();
             }
             catch { }
-            finally { polling = 0; }
+            finally
+            {
+                polling = 0;
+                if (Interlocked.Exchange(ref pollAgain, 0) == 1) ThreadPool.QueueUserWorkItem(delegate { Poll(); });   // 讀的途中又有變化
+            }
         }
 
         static bool Init()
@@ -275,6 +385,7 @@ namespace VideoWallpaper
                 streamRefType = WinRT("Windows.Storage.Streams.IRandomAccessStreamReference", "Windows.Storage");
                 Type rt;
                 manager = Await(Call(null, managerType, "RequestAsync", out rt), rt);
+                Watch(manager, managerType, "SessionsChanged", "CurrentSessionChanged");   // 開了、關了播放器
                 return true;
             }
             catch { return false; }

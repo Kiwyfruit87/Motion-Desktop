@@ -61,25 +61,40 @@ namespace VideoWallpaper
 
             public bool Sliding(long now) { return Ms > 0 && now - Start < Ms; }
 
-            // 往前推到 now：頁面加速時卡片落後一點、減速時往前衝一點再彈回（彈簧 response 0.17、阻尼比 0.5，只受頁面的加速度推；
-            // 1080p 上最多偏離約 85 像素，停下時多彈兩下）；卡片移動得越快沿方向拉長越多（最多 6%，彈簧 0.5 / 0.52，停下時會稍微變扁再恢復）
+            // 頁面往下蓋上來（打開鎖定畫面）
+            bool Down { get { return To < From; } }
+
+            // 頁面在 time 毫秒時的加速度（像素 / 秒²，用曲線本身的二階差分算），滑完就是 0。
+            // 收起時推力在滑到 35%～50% 時平順地放掉；打開時一路推到底（一般的彈跳）
+            double PageAccel(double time)
+            {
+                const double h = 4;
+                if (Ms <= 0 || time > Start + Ms + 2 * h) return 0;
+                double f = Down ? 0 : Math.Max(0, Math.Min(1, ((time - Start) / Ms - 0.35) / 0.15));
+                return (PageY(time + h) - 2 * PageY(time) + PageY(time - h)) / (h * h) * 1e6 * (1 - f * f * (3 - 2 * f));
+            }
+
+            // 往前推到 now：頁面加速時卡片落後一點、減速時往前衝一點再彈回（彈簧 response 0.17，受頁面的加速度推）。
+            // 打開：一般的彈跳（阻尼比 0.5，推到底）——1080p 約落後 45、衝過頭 37 像素就停。
+            // 收起：阻尼比 0.3，推力在頁面滑到 35%～50% 時平順地放掉，之後卡片靠自己的彈性彈回來（頁面減速的後半段一直推，會把往回彈的那一下抵銷掉）：
+            // 第二下看得出來、但比第一下弱——1080p 約 61 → 22 → 8；
+            // 卡片移動得越快沿方向拉長越多（最多 6%，彈簧 0.5 / 0.52，停下時會稍微變扁再恢復）
             public bool Step(long now)
             {
-                double dt = LastTick == 0 ? 0 : Math.Min(1 / 30.0, (now - LastTick) / 1000.0);
+                // 推力是照時間直接算的，這一格隔了多久都照實際的時間一小步一小步算（引擎卡一下也不會少算頁面的加速度）
+                double dt = LastTick == 0 ? 0 : Math.Min(0.1, (now - LastTick) / 1000.0);
                 LastTick = now;
                 if (dt <= 0) return Running(now);
-                const double h = 4;   // 毫秒：用曲線本身算速度和加速度（不受畫面更新時間不均勻影響）
-                double tm = now, pv = 0, pa = 0;
-                if (Sliding(now) || Sliding(now - (long)(2 * h)))
-                {
-                    double y0 = PageY(tm - h), y1 = PageY(tm), y2 = PageY(tm + h);
-                    pv = (y2 - y0) / (2 * h) * 1000;
-                    pa = (y2 - 2 * y1 + y0) / (h * h) * 1e6;
-                }
-                double w = 2 * Math.PI / 0.17;
+                const double h = 4;   // 毫秒：用曲線本身算速度（不受畫面更新時間不均勻影響）
+                double pv = Sliding(now) || Sliding(now - (long)(2 * h)) ? (PageY(now + h) - PageY(now - h)) / (2 * h) * 1000 : 0;
+                double w = 2 * Math.PI / 0.17, zeta = Down ? 0.5 : 0.3;
                 int n = Math.Max(1, (int)Math.Ceiling(dt * 240));
-                double step = dt / n;
-                for (int i = 0; i < n; i++) { DV += (-pa - w * w * D - 2 * 0.5 * w * DV) * step; D += DV * step; }
+                double step = dt / n, t0 = now - dt * 1000;
+                for (int i = 0; i < n; i++)   // 每一小步在那一小步的中間取頁面的加速度
+                {
+                    double pa = PageAccel(t0 + (i + 0.5) * step * 1000);
+                    DV += (-pa - w * w * D - 2 * zeta * w * DV) * step; D += DV * step;
+                }
                 double speed = Math.Abs(pv + DV);
                 Stretch.Step(0.06 * Math.Tanh(speed / (900 * Scale)), 0.5, 0.52, dt);
                 return Running(now);
@@ -102,13 +117,19 @@ namespace VideoWallpaper
             public LiquidCardSpec Spec;
             // 進度
             public double Position, Duration;
-            public bool Playing, Scrubbing;
+            public bool Playing, Scrubbing, CanSeek = true;
             public long PositionTick;
             public readonly Spring Scrub = new Spring();
             // 歌詞圓鈕
             public double LyricsLevel = 0.6;
             public bool LyricsOn;
             public readonly Spring On = new Spring(), LyricsDim = new Spring();
+            // 歌詞顯示時玻璃往上延伸多少（像素，Extend 是目標；Extended 是彈簧現在長到哪）
+            public double Extend, Extended;   // （Extended 縮回時可以短暫是負的：回彈）
+            public readonly Spring Grow = new Spring();
+            // 左右跟著彈（像果凍）：寬度多（正）或少（負）幾成，被長高的速度推一下以後自己晃一兩下才停
+            public double Wobbled;
+            public readonly Spring Wobble = new Spring();
             // 歌詞圓鈕按下的樣子：按著沒、什麼時候按的、按下的程度
             public bool Held;
             public long PressedAt;
@@ -131,10 +152,12 @@ namespace VideoWallpaper
         LiquidGlass clockLiquid; // 時鐘數字的玻璃（自己一份模糊圖：跟卡片不在同一個地方，共用的話每一格都要重新模糊）
         bool clockTried;
         int featureLevel;
-        // 兩層玻璃的質感（每一格重複用，不另外配置）。卡片：清澈的玻璃（色調照 iOS 26「正在播放」卡片的照片量出來的，見 Look.Clear）：
-        // 背景輕輕糊（0.25）、加 6.7% 的無色白；邊緣的液態折射：強度 3.0、折射帶 40（圓角最外緣位移約 3.0 × 0.5 × 40 × 1.5 = 90；
-        // 上下直邊、圓角打折，見卡片的 Focus）、色散 0.022；細白線和內側提亮的強度 1
-        readonly LiquidGlass.Look cardLook = new LiquidGlass.Look { Clear = 1, Scatter = 0.25f, TintAmt = 0.067f, Refract = 3.0f, Bevel = 40, Spec = 1, CA = 0.022f, Sat = 1, Legible = 0, Reflect = 0 };
+        // 兩層玻璃的質感（每一格重複用，不另外配置）。卡片（見 Look.Clear）：以字好讀為先的半透明霧面玻璃——
+        // 中央的散射跟著背景調：背景平順 0.6（微糊和輕模糊之間），背景很雜（燈、輪廓、紋理）0.82（輕模糊和重模糊之間）；靠邊那一圈 0.4（透明一點，看得到折射）；
+        // 飽和度 1.25（暗的地方不加）、5% 帶一點環境色調的光；外圍折射帶 30 × 1.5 = 45（彎月面，最外緣往外取樣約 0.88 × 45 ≈ 40；上下直邊打折、圓角稍微加強，見卡片的 Focus）、
+        // 色散 0.025（最外緣紅藍分開約 0.9 像素；分不到 0.12 像素的地方不算色散，省取樣）；細高光、內側提亮、細線的強度 1.15。
+        // 之前的清澈版（中央 0.32、白霧 6.7%、折射帶 60、位移約 72）記在 E:\vw-tests\notes\clear_card；改成自適應之前的版本在 E:\vw-tests\cardlab\before
+        readonly LiquidGlass.Look cardLook = new LiquidGlass.Look { Clear = 1, Scatter = 0.6f, ScatterBusy = 0.82f, ScatterRim = 0.4f, Sat = 1.25f, TintAmt = 0.05f, Refract = 0.88f, Bevel = 30, Spec = 1.15f, CA = 0.025f, Legible = 0, Reflect = 0 };
         readonly LiquidGlass.Look topLook = LiquidGlass.Look.OnTop(1);
         // 時鐘的玻璃數字（照 iOS 26 玻璃時鐘的照片量出來的，見 LiquidGlass 的 TextGlass；以下是 1080p 的像素）：
         // 邊緣往字裡面取樣的鉤 16、衰減 0.9（只在最外緣約 1～3 像素）、色散 0.4；裡面輕輕糊（0.15）、加一層無色的白；輪廓線 1
@@ -154,13 +177,23 @@ namespace VideoWallpaper
         }
 
         // 播放進度（秒）：播放中引擎自己往後推；拖曳中（scrubbing）直接用 position
-        public void SetLiquidProgress(IntPtr hwnd, double position, double duration, bool playing, bool scrubbing)
+        public void SetLiquidProgress(IntPtr hwnd, double position, double duration, bool playing, bool scrubbing, bool canSeek)
         {
             WithTarget(hwnd, delegate(Target t, long now)
             {
                 if (t.Liquid == null) return;
                 var c = t.Liquid;
                 c.Position = position; c.Duration = duration; c.Playing = playing && !scrubbing; c.Scrubbing = scrubbing; c.PositionTick = now;
+                c.CanSeek = canSeek;
+            });
+        }
+
+        // 歌詞顯示時卡片的玻璃往上延伸 up 像素，把歌詞包進來；0 = 收回。用彈簧長上去、縮回來（稍微回彈一點）
+        public void SetLiquidExtend(IntPtr hwnd, double up)
+        {
+            WithTarget(hwnd, delegate(Target t, long now)
+            {
+                if (t.Liquid != null) t.Liquid.Extend = up;
             });
         }
 
@@ -181,7 +214,8 @@ namespace VideoWallpaper
             {
                 if (t.Liquid == null) return;
                 var c = t.Liquid;
-                if (down && !c.Touching) { c.TouchAge = 0; c.LastTick = 0; }   // 閒置後的第一格不要一次跳太多（dt 從 0 開始算）
+                // 閒置後的第一格不要一次跳太多：很久沒畫才從現在開始算（還在動的話照常往下算，玻璃不會停一格）
+                if (down && !c.Touching) { c.TouchAge = 0; if (now - c.LastTick > 100) c.LastTick = now; }
                 if (down) { c.TouchX = x; c.TouchY = y; }
                 c.Touching = down;
             });
@@ -194,7 +228,7 @@ namespace VideoWallpaper
             {
                 if (t.Liquid == null || button != LyricsButton) return;
                 var c = t.Liquid;
-                if (down && !c.Held) { c.PressedAt = now; c.LastTick = 0; }
+                if (down && !c.Held) { c.PressedAt = now; if (now - c.LastTick > 100) c.LastTick = now; }
                 c.Held = down;
             });
         }
@@ -399,7 +433,8 @@ namespace VideoWallpaper
             long since = now - c.PressedAt;
             bool pressing = c.PressedAt != 0 && (c.Held || since < 120) && since >= 30;
             double pressTarget = pressing ? 1 : 0;
-            c.Pressed = Math.Max(0, c.Press.Step(pressTarget, pressing ? 0.24 : 0.54, pressing ? 0.84 : 0.58, dt));
+            // 放開時臨界阻尼：軟軟地落回原本的大小，不會縮過頭再被硬擋住（Apple 的按鈕放開不回彈）
+            c.Pressed = Math.Max(0, c.Press.Step(pressTarget, pressing ? 0.24 : 0.35, pressing ? 0.84 : 1.0, dt));
             bool pressMoving = c.Press.Moving(pressTarget, 0.002) || c.PressedAt != 0 && since < 150;   // 等著開始放大、等著最短的 0.12 秒過去
             // 按住卡片的白光：按著時很快亮起來、放開慢慢退；範圍從手指下面往外擴散，大約 1.2 秒擴到最大（照原型）
             c.TouchAge += dt;
@@ -408,8 +443,14 @@ namespace VideoWallpaper
             bool glowMoving = c.Touching ? c.TouchGlow < 0.998 || c.TouchAge < 1.2 : c.TouchGlow > 0;
             c.OnAmount = Math.Max(0, Math.Min(1, c.On.Step(c.LyricsOn ? 1 : 0, 0.3, 1, dt)));
             c.LyricsAlpha = c.LyricsDim.Step(Math.Min(1, c.LyricsLevel / 0.6), 0.3, 1, dt);
+            // 長上去、縮回來：幾乎不過衝（1080p 約 1 像素），乾淨地停在定位；縮回時最多比原本的卡片矮 16（碰不到上面的封面）
+            c.Extended = Math.Max(-16 * c.Spec.Scale, c.Grow.Step(c.Extend, 0.45, 0.85, dt));
+            // 往上長得快時變窄、縮回得快時變寬（照長高的速度推）：一次順順地變窄再回來，不再晃。
+            // 用 tanh 柔和地飽和（最多約 ±3.5%）：硬夾的話會頂到上限「黏住」一下；左右內距 16，變窄時還留約 9
+            double push = 0.035 * Math.Tanh(-0.008 * c.Grow.V / Math.Max(1, c.Spec.H) / 0.035);
+            c.Wobbled = c.Wobble.Step(push, 0.3, 0.8, dt);
 
-            return moving || c.Scrub.Moving(c.Scrubbing ? 1 : 0, 0.002) || c.Sweeping || pressMoving || glowMoving
+            return moving || c.Grow.Moving(c.Extend, 0.3) || c.Wobble.Moving(push, 0.0005) || c.Scrub.Moving(c.Scrubbing ? 1 : 0, 0.002) || c.Sweeping || pressMoving || glowMoving
                 || c.On.Moving(c.LyricsOn ? 1 : 0, 0.002) || c.LyricsDim.Moving(Math.Min(1, c.LyricsLevel / 0.6), 0.002);
         }
 
@@ -431,20 +472,22 @@ namespace VideoWallpaper
             var spec = t.Liquid.Spec;
             double s = spec.Scale, sx, sy, dx, dy;
             CardTransform(t, out sx, out sy, out dx, out dy);
-            double cx = (spec.X + spec.W / 2) * sx + dx, cy = (spec.Y + spec.H / 2) * sy + dy;
+            // 歌詞顯示時往上延伸 ext（下緣不動；折射帶的寬度照原本的卡片算，不跟著變）；左右跟著彈（見 Wobble）
+            double ext = t.Liquid.Extended, wobble = t.Liquid.Wobbled;
+            double cx = (spec.X + spec.W / 2) * sx + dx, cy = (spec.Y + spec.H / 2 - ext / 2) * sy + dy;
             var card = new LiquidGlass.Shape
             {
-                X = (float)cx, Y = (float)cy, HalfW = (float)(spec.W / 2), HalfH = (float)(spec.H / 2), Radius = (float)spec.Radius,
+                X = (float)cx, Y = (float)cy, HalfW = (float)(spec.W / 2 * (1 + wobble)), HalfH = (float)((spec.H + ext) / 2), Radius = (float)spec.Radius,
                 Appear = 1, Thick = (float)Math.Max(0.6, Math.Min(1.5, Math.Min(spec.W, spec.H) / 2 / (cardLook.Bevel * s))),
-                Mag = 1, D00 = (float)(1 / sx), D11 = (float)(1 / sy),   // 不染色、不放大、沒有影子（照片裡都沒有）
+                Mag = 1, Shadow = 0.11f, D00 = (float)(1 / sx), D11 = (float)(1 / sy),   // 不染色、不放大；很淡、很柔的影子（浮在桌布上，不是黑框）
                 Focus = 0.45f,   // 上下兩條直邊的折射只剩 55%（背景的字不會被拉長）；左右邊、圓角全強度
             };
             // 模糊的範圍：卡片原本的位置加上四周（卡片的慣性移動也還在範圍裡）；要畫的範圍：卡片現在的位置加上影子
             // 四周 96：邊緣最多往外取樣 90 × 1.022（色差）− 中央放大內縮約 15 ≈ 77，再留模糊的寬度
             int margin = (int)Math.Ceiling(96 * s), slack = (int)Math.Ceiling(90 * s);   // 上下多留 90：卡片慣性晃動最多約 85
             int bx, by, bw, bh, ex, ey, ew, eh;
-            Clip(t, spec.X - margin, spec.Y - margin - slack, spec.W + 2 * margin, spec.H + 2 * (margin + slack), out bx, out by, out bw, out bh);
-            double hw = spec.W / 2 * sx, hh = spec.H / 2 * sy, pad = 52 * s;
+            Clip(t, spec.X - margin, spec.Y - ext - margin - slack, spec.W + 2 * margin, spec.H + ext + 2 * (margin + slack), out bx, out by, out bw, out bh);
+            double hw = spec.W / 2 * (1 + wobble) * sx, hh = (spec.H + ext) / 2 * sy, pad = 52 * s;
             Clip(t, cx - hw - pad, cy - hh - pad, 2 * (hw + pad), 2 * (hh + pad), out ex, out ey, out ew, out eh);
             if (bw <= 0 || bh <= 0 || ew <= 0 || eh <= 0) return moving;
             // 影片沒換格、範圍也沒變：沿用上次的模糊（後面本來就糊掉了，一秒更新 30 次看起來跟 60 次一樣）
@@ -486,11 +529,11 @@ namespace VideoWallpaper
             if (c == null || c.Spec == null) return;
             var spec = c.Spec;
             double s = spec.Scale;
-            // 進度條：高 6（按住時 9）、軌道白 29%（按住 35%）、已播放白 86%（按住 100%）；不知道歌曲長度就不畫
+            // 進度條：高 6（按住時 9）、軌道白 29%（按住 35%；播放器不接受跳轉、不能拖時 20%）、已播放白 86%（按住 100%）；不知道歌曲長度就不畫
             if (c.Progress >= 0)
             {
                 double sc = c.ScrubAmount, ph = (6 + 3 * sc) * s, plen = spec.ProgressX1 - spec.ProgressX0;
-                canvas.FillSolid(spec.ProgressX0, spec.ProgressY - ph / 2, plen, ph, ph / 2, 1, 1, 1, 0.29 + 0.06 * sc);
+                canvas.FillSolid(spec.ProgressX0, spec.ProgressY - ph / 2, plen, ph, ph / 2, 1, 1, 1, c.CanSeek ? 0.29 + 0.06 * sc : 0.2);
                 double played = plen * c.Progress;
                 if (played > 0.5) canvas.FillSolid(spec.ProgressX0, spec.ProgressY - ph / 2, played, ph, ph / 2, 1, 1, 1, 0.86 + 0.14 * sc, spec.ProgressX0, plen);
             }

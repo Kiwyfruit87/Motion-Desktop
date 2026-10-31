@@ -143,8 +143,8 @@ namespace VideoWallpaper
       <Setter Property='Template'>
         <Setter.Value>
           <ControlTemplate TargetType='RadioButton'>
-            <!-- 選取的玻璃水滴由 GlassDrop 負責（切換時像液體一樣滑過去） -->
-            <Grid Height='32' Background='Transparent'>
+            <!-- 選取的玻璃水滴由 GlassDrop 負責（切換時像液體一樣滑過去）；高 54（圖示在上、字在下，像 iPhone 的分頁列），整條軌道 60 -->
+            <Grid Height='54' Background='Transparent'>
               <Border x:Name='Glow' CornerRadius='99' Tag='Pill' Opacity='0'/>
               <ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center' Margin='0,0,0,1'/>
             </Grid>
@@ -296,24 +296,24 @@ namespace VideoWallpaper
       </Grid>
     </Grid>
 
-    <!-- 畫面縮放（分區圓角 24 = 分段的圓角 19 + 邊距 5） -->
-    <Border CornerRadius='24' Background='{DynamicResource SectionFill}' Padding='5' Margin='0,8,0,0'>
+    <!-- 畫面縮放（分區的圓角跟其他分區一樣 24；分段控制左右留 9，按住時變寬也不會碰到邊；上下多留一點，不擠） -->
+    <Border CornerRadius='24' Background='{DynamicResource SectionFill}' Padding='9,5,9,6' Margin='0,8,0,0'>
       <StackPanel>
-        <TextBlock Text='畫面縮放' FontWeight='SemiBold' Margin='13,9,0,8'/>
+        <TextBlock Text='畫面縮放' FontWeight='SemiBold' Margin='9,10,0,12'/>
         <Grid>
          <!-- 軌道（按住選取時整個變寬 10、變亮一點；上面的字、選取不跟著拉） -->
          <Grid x:Name='SegmentBack'>
           <Border CornerRadius='99' Tag='Pill' Background='{DynamicResource SegmentTrack}'/>
           <Border x:Name='SegmentShine' CornerRadius='99' Tag='Pill' Background='White' Opacity='0'/>
+          <!-- 上緣一條細亮邊（實機有；按住時被透鏡折射成透鏡裡面的一圈內框） -->
+          <Border CornerRadius='99' Tag='Pill' BorderThickness='0,1,0,0' BorderBrush='#38FFFFFF' IsHitTestVisible='False'/>
          </Grid>
          <Border Padding='3'>
           <Grid x:Name='SegmentHost'>
             <!-- 選取的實心膠囊（畫在字的下面）：位置、大小由 GlassDrop 的物理控制；放在 Canvas 裡才不會撐大版面 -->
             <Canvas IsHitTestVisible='False'>
               <Grid x:Name='SegmentThumb'>
-                <Border x:Name='SegmentSolid' CornerRadius='99' Tag='Pill' Background='{DynamicResource SegmentSelected}'>
-                  <Border.Effect><DropShadowEffect BlurRadius='8' ShadowDepth='1' Direction='270' Opacity='0.18'/></Border.Effect>
-                </Border>
+                <Border x:Name='SegmentSolid' CornerRadius='99' Tag='Pill' Background='{DynamicResource SegmentSelected}'/>
                 <Border CornerRadius='99' Tag='Pill' BorderBrush='{DynamicResource KnobRim}' BorderThickness='1'/>
               </Grid>
             </Canvas>
@@ -324,14 +324,31 @@ namespace VideoWallpaper
                 <ColumnDefinition Width='*'/><ColumnDefinition Width='3'/>
                 <ColumnDefinition Width='*'/>
               </Grid.ColumnDefinitions>
-              <RadioButton x:Name='StretchFill' Grid.Column='0' Style='{StaticResource Segment}' Content='填滿'/>
-              <RadioButton x:Name='StretchUniform' Grid.Column='2' Style='{StaticResource Segment}' Content='完整顯示'/>
-              <RadioButton x:Name='StretchStretch' Grid.Column='4' Style='{StaticResource Segment}' Content='拉伸'/>
+              <!-- 每格上面一個圖示、下面字：填滿（裁切）、完整顯示（整頁放進框裡）、拉伸（往外撐開）。
+                   圖示用向量線條畫（粗 2.1、圓頭）：圖示字型沒有粗體，硬加粗的邊緣很粗糙；顏色跟著按鈕的字（選到時是強調色） -->
+              <RadioButton x:Name='StretchFill' Grid.Column='0' Style='{StaticResource Segment}'>
+                <StackPanel>
+                  <Path Data='M7,2.5 V17 H21.5 M2.5,7 H17 V21.5' Width='24' Height='24' HorizontalAlignment='Center' Margin='0,0,0,3' StrokeThickness='2.1' StrokeStartLineCap='Round' StrokeEndLineCap='Round' StrokeLineJoin='Round' Stroke='{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}'/>
+                  <TextBlock Text='填滿' FontSize='10.5' HorizontalAlignment='Center'/>
+                </StackPanel>
+              </RadioButton>
+              <RadioButton x:Name='StretchUniform' Grid.Column='2' Style='{StaticResource Segment}'>
+                <StackPanel>
+                  <Path Data='M5,4.5 H19 A2.5,2.5 0 0 1 21.5,7 V17 A2.5,2.5 0 0 1 19,19.5 H5 A2.5,2.5 0 0 1 2.5,17 V7 A2.5,2.5 0 0 1 5,4.5 Z M7,10.5 V8.5 H9.5 M14.5,8.5 H17 V10.5 M17,13.5 V15.5 H14.5 M9.5,15.5 H7 V13.5' Width='24' Height='24' HorizontalAlignment='Center' Margin='0,0,0,3' StrokeThickness='2.1' StrokeStartLineCap='Round' StrokeEndLineCap='Round' StrokeLineJoin='Round' Stroke='{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}'/>
+                  <TextBlock Text='完整顯示' FontSize='10.5' HorizontalAlignment='Center'/>
+                </StackPanel>
+              </RadioButton>
+              <RadioButton x:Name='StretchStretch' Grid.Column='4' Style='{StaticResource Segment}'>
+                <StackPanel>
+                  <Path Data='M14,2.5 H21.5 V10 M21.5,2.5 L13.5,10.5 M10,21.5 H2.5 V14 M2.5,21.5 L10.5,13.5' Width='24' Height='24' HorizontalAlignment='Center' Margin='0,0,0,3' StrokeThickness='2.1' StrokeStartLineCap='Round' StrokeEndLineCap='Round' StrokeLineJoin='Round' Stroke='{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}'/>
+                  <TextBlock Text='拉伸' FontSize='10.5' HorizontalAlignment='Center'/>
+                </StackPanel>
+              </RadioButton>
             </Grid>
           </Grid>
         </Border>
         </Grid>
-        <TextBlock x:Name='StretchHint' FontSize='12' Foreground='{DynamicResource TextSecondary}' Margin='13,8,13,8' TextWrapping='Wrap'/>
+        <TextBlock x:Name='StretchHint' FontSize='12' Foreground='{DynamicResource TextSecondary}' Margin='9,12,9,8' TextWrapping='Wrap'/>
       </StackPanel>
     </Border>
 
@@ -470,6 +487,10 @@ namespace VideoWallpaper
             {
                 previewVideo.Clip = new RectangleGeometry(new Rect(e.NewSize), 24, 24);   // 跟預覽卡片的圓角一樣
             };
+            // 預覽永遠拉滿整個框（Stretch.Fill），縮放模式用左右、上下的縮放做出來，換模式時才能平順地變過去（見 StepPreview）
+            previewMedia.Stretch = previewImage.Stretch = Stretch.Fill;
+            previewMedia.RenderTransformOrigin = previewImage.RenderTransformOrigin = new Point(0.5, 0.5);
+            previewMedia.RenderTransform = previewImage.RenderTransform = previewScale;
 
             window = new Window
             {
@@ -616,6 +637,7 @@ namespace VideoWallpaper
         public void Show()
         {
             if (quitting) return;   // 正在結束（面板收起來的那 0.45 秒）：不再打開
+            previewKnown = false;   // 打開時預覽直接是現在的縮放模式（不要從上次收起時的樣子變過去）
             EnsureGlass();
             open = true;
             // 打開面板時重新查一次開機自動啟動（例如在工作排程器裡被改過）：要連線到系統服務，放到背景做，查好再更新開關
@@ -748,6 +770,34 @@ namespace VideoWallpaper
         }
 
         bool deferPreview;     // 面板剛打開：預覽等一下再載入
+
+        // 預覽的縮放模式：畫面永遠拉滿整個框，再用左右、上下的縮放做出填滿（放大、超出的裁掉）、完整顯示（縮小、留邊）、拉伸（不縮放）。
+        // 換模式時兩個方向各用一顆彈簧平順地變過去（0.45 秒、幾乎不回彈）；剛打開、換了影片時直接到位
+        readonly ScaleTransform previewScale = new ScaleTransform();
+        readonly Spring previewSx = new Spring(), previewSy = new Spring();
+        bool previewKnown;   // 已經知道畫面的長寬比了（不知道時先拉滿，知道的那一下直接跳到位，不要從拉滿變過去）
+
+        void StepPreview(double dt)
+        {
+            bool image = previewImage.Visibility == Visibility.Visible;
+            double cw = 0, ch = 0;
+            if (image) { var b = previewImage.Source as System.Windows.Media.Imaging.BitmapSource; if (b != null) { cw = b.PixelWidth; ch = b.PixelHeight; } }
+            else if (previewMedia.Source != null) { cw = previewMedia.NaturalVideoWidth; ch = previewMedia.NaturalVideoHeight; }
+            double w = previewVideo.ActualWidth, h = previewVideo.ActualHeight, sx = 1, sy = 1;
+            bool known = cw > 0 && ch > 0 && w > 0 && h > 0;
+            if (known)
+            {
+                double content = cw / ch, box = w / h;
+                if (app.Stretch == Stretch.Uniform) { if (content > box) sy = box / content; else sx = content / box; }
+                else if (app.Stretch == Stretch.UniformToFill) { if (content > box) sx = content / box; else sy = box / content; }
+            }
+            if (!known || !previewKnown) { previewSx.Jump(sx); previewSy.Jump(sy); }
+            previewKnown = known;
+            sx = previewSx.Step(sx, 0.45, 0.95, dt);
+            sy = previewSy.Step(sy, 0.45, 0.95, dt);
+            if (previewScale.ScaleX != sx) previewScale.ScaleX = sx;
+            if (previewScale.ScaleY != sy) previewScale.ScaleY = sy;
+        }
         string appliedTheme;   // 上次套的顏色（深淺、液態玻璃、強調色）
 
         void UpdatePreview(bool fresh = false)
@@ -762,11 +812,11 @@ namespace VideoWallpaper
             UpdatePreviewImage();
             if (previewPath != app.VideoPath)
             {
+                previewKnown = false;   // 換了影片：新的長寬比直接到位
                 previewPath = app.VideoPath;
                 previewPlaying = null;
                 previewMedia.Source = new Uri(previewPath);
             }
-            previewMedia.Stretch = app.Stretch;
             // 停在桌布現在的那一格，不播：面板是透明的分層視窗，預覽影片每一格都要把整個面板重畫、讀回來，太耗 CPU
             if (previewPlaying == false)
             {
@@ -786,8 +836,8 @@ namespace VideoWallpaper
             previewImage.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
             previewMedia.Visibility = show ? Visibility.Collapsed : Visibility.Visible;
             if (!show) { if (previewImagePath != null) { previewImage.Source = null; previewImagePath = null; } return; }
-            previewImage.Stretch = app.Stretch;
             if (previewImagePath == app.VideoPath) return;
+            previewKnown = false;
             previewImagePath = app.VideoPath;
             try
             {

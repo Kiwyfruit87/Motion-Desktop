@@ -207,6 +207,7 @@ namespace VideoWallpaper
             double now = time.TotalSeconds;
 
             if (glass != null) glass.Kick();   // 每一格叫背景執行緒抓一次後面的畫面
+            StepPreview(dt);                    // 預覽換縮放模式時平順地變過去
 
             // 出現 / 收起來；收完了才真的把視窗藏起來
             appear.Step(appearTarget, appearTarget > 0.5 ? 0.6 : 0.28, appearTarget > 0.5 ? 0.92 : 1, dt);
@@ -273,13 +274,13 @@ namespace VideoWallpaper
             if (drop.Step(content, now, dt))
             {
                 drop.Mark(content);
-                // 按住時整個軌道變大（實機約 4%：寬每邊多 6、高多 4%）、變亮約 +15/255（亮度比大小先到、放開時退得慢）
+                // 按住時整個軌道變大（實機約 4%：寬每邊多 6、高多 4%）、變亮約 +23/255（亮度比大小先到、放開時退得慢）
                 var back = (ScaleTransform)segmentBack.RenderTransform;
                 double wide = segmentBack.ActualWidth > 0 ? (segmentBack.ActualWidth + 12 * drop.Lift) / segmentBack.ActualWidth : 1;
                 double tall = 1 + 0.04 * drop.Lift;
                 if (back.ScaleX != wide) back.ScaleX = wide;
                 if (back.ScaleY != tall) back.ScaleY = tall;
-                double shine = 0.06 * drop.Shine;
+                double shine = 0.09 * drop.Shine;
                 if (segmentShine.Opacity != shine) segmentShine.Opacity = shine;
                 drop.Place(content, glass != null);
                 if (glass != null && drop.Lifted && upper.Count < GlassBackdrop.MaxShapes) { var s = pool[used++]; drop.Shape(s, shown); upper.Add(s); }

@@ -17,10 +17,11 @@ namespace VideoWallpaper
         {
             public List<Line> Lines;   // null = 沒有歌詞（純音樂、查不到）
             public bool Synced;        // 有時間標記
-            public bool Failed;        // 網路錯誤：過一分鐘再查一次
+            public bool Failed;        // 網路錯誤：過 15 秒再查一次
             public DateTime When;
             // 整首歌畫好的長圖（查到歌詞後在背景先畫好，按下歌詞按鈕就能馬上淡入）；還沒畫好是 null
             public int[] Sheet;
+            public int[] SheetBlur;                         // 同一張長圖糊掉的版本（離目前這行越遠的行越往它混；畫不出來是 null，就不糊）
             public int SheetWidth, SheetHeight, SheetFor;   // SheetFor：照多高的螢幕畫的
             public int SheetFailedFor;                      // 照這個螢幕高度畫長圖失敗過（太長、記憶體不夠）：不再重畫，這首就不顯示歌詞
             public double[] Centers, Heights;   // 每一行在長圖上的中心高度、行高
@@ -47,7 +48,7 @@ namespace VideoWallpaper
             Result cached;
             lock (gate)
             {
-                bool have = cache.TryGetValue(key, out cached) && !(cached.Failed && (DateTime.UtcNow - cached.When).TotalSeconds > 60);
+                bool have = cache.TryGetValue(key, out cached) && !(cached.Failed && (DateTime.UtcNow - cached.When).TotalSeconds > 15);
                 if (have && (!Has(cached) || SheetReady(cached, screenHeight) || cached.SheetFailedFor == screenHeight)) return cached;
                 if (loading.Contains(key)) return have ? cached : null;
                 loading.Add(key);
@@ -80,7 +81,7 @@ namespace VideoWallpaper
                         if (oldest == key) { cacheOrder.Enqueue(key); continue; }   // 現在這首不拿掉，排回最後面
                         if (!cache.TryGetValue(oldest, out old)) continue;
                         cache.Remove(oldest);
-                        if (sheets.Remove(old)) old.Sheet = null;
+                        if (sheets.Remove(old)) { old.Sheet = null; old.SheetBlur = null; }
                     }
                 }
                 ui.BeginInvoke(loaded);
@@ -98,15 +99,17 @@ namespace VideoWallpaper
                     int w, h;
                     double[] centers, heights;
                     double spacing;
-                    var pixels = LockClock.RenderLyricsSheet(screenHeight, r.Lines, out w, out h, out centers, out heights, out spacing);
+                    int[] blurred;
+                    var pixels = LockClock.RenderLyricsSheet(screenHeight, r.Lines, out w, out h, out centers, out heights, out spacing, out blurred);
                     lock (gate)
                     {
                         r.SheetWidth = w; r.SheetHeight = h; r.Centers = centers; r.Heights = heights; r.Spacing = spacing; r.SheetFor = screenHeight;
                         r.Sheet = pixels;
+                        r.SheetBlur = blurred;
                         // 移到最後面（重畫的歌原本就在清單裡的話先拿掉，才不會有兩筆、清掉舊的那筆時把剛畫好的長圖也清掉）
                         sheets.Remove(r);
                         sheets.Add(r);
-                        while (sheets.Count > 3) { sheets[0].Sheet = null; sheets.RemoveAt(0); }
+                        while (sheets.Count > 3) { sheets[0].Sheet = null; sheets[0].SheetBlur = null; sheets.RemoveAt(0); }
                     }
                 }
                 catch { lock (gate) r.SheetFailedFor = screenHeight; }   // 畫不出來：記下來，之後不再重畫（不然每次重整都會再畫一次）
@@ -129,7 +132,21 @@ namespace VideoWallpaper
                 string exact = Download("https://lrclib.net/api/get?track_name=" + Uri.EscapeDataString(title)
                     + "&artist_name=" + Uri.EscapeDataString(artist) + "&album_name=" + Uri.EscapeDataString(album)
                     + "&duration=" + Math.Round(duration).ToString(CultureInfo.InvariantCulture));
-                var r = exact == null ? null : FromEntry(Web.Json(exact) as Dictionary<string, object>, duration);
+                var entry = exact == null ? null : Web.Json(exact) as Dictionary<string, object>;
+                var r = FromEntry(entry, duration);
+                if (r != null && r.Synced && !Explicit(entry))
+                {
+                    // 有時間標記、但沒有髒話：同一首歌常有原版和消音的乾淨版（「Fuck it if…」→「What if…」），歌名、長度都一樣，
+                    // 播放器也不會說是哪一版。Spotify、Apple Music 預設播原版，所以再搜一次，有長度相符的原版歌詞就用原版
+                    try
+                    {
+                        string found = Download("https://lrclib.net/api/search?track_name=" + Uri.EscapeDataString(title) + "&artist_name=" + Uri.EscapeDataString(artist));
+                        var best = found == null ? null : Pick(Web.Json(found) as object[], duration);
+                        if (best != null && Explicit(best) && Text(best, "syncedLyrics").Length > 0) return FromEntry(best, duration) ?? r;
+                    }
+                    catch { }   // 搜尋失敗（伺服器忙）：用精確查到的就好
+                    return r;
+                }
                 if (r != null && (r.Synced || !Has(r))) return r;   // 有時間標記、或資料庫標明是純音樂：直接用
                 fallback = r;
             }
@@ -148,7 +165,20 @@ namespace VideoWallpaper
             return fallback ?? new Result();   // 都沒有時間標記：用一般歌詞；什麼都沒有：沒有歌詞
         }
 
-        // 搜尋結果裡挑最適合的：同步歌詞優先，再來是一般歌詞，長度差太多（多半是別的版本）的不要
+        // 歌詞裡有沒有髒話（原版；乾淨版會消音或換詞）
+        static readonly System.Text.RegularExpressions.Regex Swear = new System.Text.RegularExpressions.Regex(
+            @"\b(fuck|fucks|fucked|fucking|fuckin|motherfucker|shit|shits|shitty|bitch|bitches|nigga|niggas|pussy|cunt)\b",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        static bool Explicit(Dictionary<string, object> e)
+        {
+            if (e == null) return false;
+            string text = Text(e, "syncedLyrics");
+            return Swear.IsMatch(text.Length > 0 ? text : Text(e, "plainLyrics"));
+        }
+
+        // 搜尋結果裡挑最適合的：同步歌詞優先，再來是一般歌詞，長度差太多（多半是別的版本）的不要；
+        // 同一種裡原版（有髒話）優先，除非長度比乾淨版多差 4 秒以上（那多半是別的版本）
         static Dictionary<string, object> Pick(object[] list, double duration)
         {
             if (list == null) return null;
@@ -163,7 +193,7 @@ namespace VideoWallpaper
                 double d = Number(e, "duration");
                 double diff = duration > 0 && d > 0 ? Math.Abs(d - duration) : 0;
                 if (diff > 10) continue;
-                double score = diff + (synced ? 0 : plain ? 100 : 200);
+                double score = diff + (synced ? 0 : plain ? 100 : 200) + (Explicit(e) ? 0 : 4);
                 if (score < bestScore) { bestScore = score; best = e; }
             }
             return best;
@@ -174,10 +204,15 @@ namespace VideoWallpaper
             if (e == null) return null;
             if (Flag(e, "instrumental")) return new Result();   // 純音樂
             var synced = ParseLrc(Text(e, "syncedLyrics"));
-            if (synced.Count > 0) return new Result { Lines = synced, Synced = true };
+            if (synced.Count > 0)
+            {
+                // 前奏比較長（第一句 4 秒以後才唱）：開頭補一行空的，前奏時就跟間奏一樣顯示三個點（見 LockLyrics）
+                if (synced[0].Time >= 4) synced.Insert(0, new Line { Time = 0, Text = "" });
+                return new Result { Lines = synced, Synced = true };
+            }
 
             // 只有一般歌詞：平均分配到歌曲長度的 5%～95% 之間（不知道長度就每行 4 秒）
-            var plain = Text(e, "plainLyrics").Replace("\r", "").Split('\n').Select(l => l.Trim()).ToList();
+            var plain = Text(e, "plainLyrics").Replace("\r", "").Split('\n').Select(l => Gap(l.Trim())).ToList();
             while (plain.Count > 0 && plain[plain.Count - 1].Length == 0) plain.RemoveAt(plain.Count - 1);
             if (plain.Count == 0) return null;
             var lines = new List<Line>();
@@ -205,11 +240,19 @@ namespace VideoWallpaper
                         times.Add(minutes * 60 + seconds);
                     i = close + 1;
                 }
-                string content = raw.Substring(i).Trim();
+                string content = Gap(raw.Substring(i).Trim());
                 foreach (double t in times) lines.Add(new Line { Time = t, Text = content });
             }
             lines.Sort((a, b) => a.Time.CompareTo(b.Time));
             return lines;
+        }
+
+        // 只有音符、刪節號之類的行（有人上傳的歌詞用「♪」「…」標間奏）：當成空行，間奏一樣顯示三個點
+        static string Gap(string text)
+        {
+            foreach (char c in text)
+                if (char.IsLetterOrDigit(c)) return text;
+            return "";
         }
 
         static string Simplify(string title)
@@ -221,8 +264,16 @@ namespace VideoWallpaper
             return t.Trim();
         }
 
-        // 查不到（404 / 400）回傳 null；連不上之類的錯誤直接丟出去
-        static string Download(string url) { return Web.Get(url, true); }
+        // 查不到（404 / 400）回傳 null；連不上、逾時、伺服器忙（429、5xx）之類的錯誤等 1 秒再試一次，還是不行才丟出去
+        static string Download(string url)
+        {
+            try { return Web.Get(url, true); }
+            catch (System.Net.WebException)
+            {
+                Thread.Sleep(1000);
+                return Web.Get(url, true);
+            }
+        }
 
         static string Text(Dictionary<string, object> e, string key) { object v; return e.TryGetValue(key, out v) && v is string ? (string)v : ""; }
         static bool Flag(Dictionary<string, object> e, string key) { object v; return e.TryGetValue(key, out v) && v is bool && (bool)v; }

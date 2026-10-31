@@ -11,7 +11,7 @@ namespace VideoWallpaper
     partial class LockScreen
     {
         const uint SWP_NOSIZE = 0x1, SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10, SWP_SHOWWINDOW = 0x40;
-        static readonly int[] HotKeys = { 0x20, 0x0D, 0x1B };   // 空白鍵、Enter、Esc（用按鍵代碼當登記編號）
+        static readonly int[] HotKeys = { 0x20, 0x0D, 0x1B, 0x4C };   // 空白鍵、Enter、Esc（滑走）、L（歌詞）（用按鍵代碼當登記編號）
 
         readonly List<LockWindow> windows = new List<LockWindow>();
         readonly List<KeyValuePair<Rect, string>> buttons = new List<KeyValuePair<Rect, string>>();   // 卡片上的按鈕在主螢幕上的位置
@@ -98,6 +98,7 @@ namespace VideoWallpaper
                 if (screen.Primary || primary == null) primary = w;
             }
             primary.Click = OnClick;
+            primary.LyricsKey = OnLyricsKey;
             primary.Drag = delegate(int x, int y)
             {
                 if (touching && engine != null) engine.TouchLiquid(primary.Handle, x, y, true);   // 白光跟著手指（顯示卡重設的空檔沒有引擎）
@@ -211,14 +212,18 @@ namespace VideoWallpaper
         // micLevel：歌詞按鈕的亮度
         void ShowMusic(NowPlaying.Track track, bool force, double micLevel)
         {
-            string musicKey = track == null ? "" : track.CardKey;   // 跟 Refresh 讀到的是同一首（背景隨時可能換歌）；不含播放 / 暫停
+            // 跟 Refresh 讀到的是同一首（背景隨時可能換歌）；不含播放 / 暫停。歌曲長度跨過一小時的話進度條的長度不一樣，也要重畫
+            string musicKey = track == null ? "" : track.CardKey + "|" + LockClock.ProgressLayout(track.Duration.TotalSeconds);
             bool playing = Playing(track);
             if (!force && musicKey == shownMusic)
             {
                 // 只是播放 / 暫停變了：只換播放鍵那張圖（很快）
                 bool? shuffle; int? repeat;
                 Modes(track, out shuffle, out repeat);
-                if (card != null && (playing != shownPlaying || shuffle != shownShuffle || repeat != shownRepeat)) ShowButtons(playing, shuffle, repeat);
+                // 上一首 / 下一首能不能用變了（換歌的空檔播放器常常閃一下）：也只換按鈕那張
+                bool canChanged = card != null && track != null && (card.CanPrev != track.CanPrev || card.CanNext != track.CanNext);
+                if (canChanged) { card.CanPrev = track.CanPrev; card.CanNext = track.CanNext; }
+                if (card != null && (canChanged || playing != shownPlaying || shuffle != shownShuffle || repeat != shownRepeat)) ShowButtons(playing, shuffle, repeat);
                 // 只有歌詞按鈕的狀態變了（開關歌詞、查到歌詞）：不用重畫卡片，花 0.3 秒慢慢變
                 if (micLevel != shownMicLevel) ShowMic(null, micLevel);
                 progress.Update(track, playing, false);
@@ -401,8 +406,24 @@ namespace VideoWallpaper
             if (card == null || primary == null) return false;
             Native.POINT p;
             if (!Native.GetCursorPos(out p)) return false;
-            int x = p.X - primary.Bounds.X, y = p.Y - primary.Bounds.Y;
-            return x >= card.InnerX && x < card.InnerX + card.InnerW && y >= card.InnerY && y < card.InnerY + card.InnerH;
+            return OnCard(p.X - primary.Bounds.X, p.Y - primary.Bounds.Y);
+        }
+
+        // (x, y)（主螢幕鎖定視窗裡的座標）在卡片的玻璃上
+        bool OnCard(int x, int y)
+        {
+            if (card == null) return false;
+            int top = card.InnerY - lyrics.Extension;   // 歌詞顯示時玻璃往上延伸的那段也算
+            return x >= card.InnerX && x < card.InnerX + card.InnerW && y >= top && y < card.InnerY + card.InnerH;
+        }
+
+        // L：打開 / 關掉歌詞，跟按歌詞圓鈕一樣（圓鈕也亮一下，像被按了；沒有歌詞時沒反應）
+        void OnLyricsKey()
+        {
+            if (busy || engine == null || card == null) return;
+            engine.PressLiquidButton(primary.Handle, VideoEngine.LyricsButton, true);
+            engine.PressLiquidButton(primary.Handle, VideoEngine.LyricsButton, false);   // 放開：還是會亮滿最短的 0.12 秒
+            if (lyrics.Toggle()) Refresh(false);
         }
 
         // 點到「正在播放」的按鈕：控制播放器、切換歌詞或拖進度條，鎖定畫面不滑走（變暗的按鈕按了也不會滑走）
@@ -432,7 +453,9 @@ namespace VideoWallpaper
                     }
                     return true;
                 }
-            return false;
+            if (!OnCard(x, y)) return false;
+            Touch(x, y, -1);   // 點在卡片上的空白處（歌名、封面、按鈕之間）：玻璃一樣有按下的光，但不做事、也不滑走
+            return true;
         }
 
         // 空白鍵 / 滑鼠：往上滑走，回到桌面

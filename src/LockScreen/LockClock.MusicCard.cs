@@ -8,7 +8,7 @@ using System.Windows.Media.Imaging;
 namespace VideoWallpaper
 {
     // 右下角的音樂卡片：照 macOS Tahoe 鎖定畫面「正在播放」的樣子，卡片本身是播放引擎畫的液態玻璃。
-    // 以 1080p 為準：卡片 400 × 198、邊距 16、封面 72（圓角 10，所以卡片圓角 26，跟封面同心）；
+    // 以 1080p 為準：卡片 400 × 198、邊距 16、封面 72（圓角 34 − 16 = 18，跟卡片同心）；
     // 封面右邊是歌名（16 半粗）和「歌手 — 專輯」（13，白 70%），右上角歌詞圓鈕；中間是時間 — 進度條 — 剩下的時間；
     // 最下面是隨機播放、⏪ ⏯ ⏩（實心、放大）、循環。進度條、歌詞圓鈕的底和玻璃由播放引擎畫（拖曳時才順）
     static partial class LockClock
@@ -27,6 +27,7 @@ namespace VideoWallpaper
             public int InnerX, InnerY, InnerW, InnerH;     // 卡片本身在螢幕上的範圍
             public double Scale, Radius;                   // 以 1080p 為 1 的縮放、卡片的圓角
             public double ProgressLeft, ProgressWidth;     // 進度條（拖曳時換算成秒數）
+            public bool CanPrev = true, CanNext = true;    // 播放器能不能跳上一首 / 下一首（不能的話鍵很淡）
             public VideoEngine.LiquidCardSpec Spec;        // 給播放引擎畫液態玻璃和卡片上的東西
         }
 
@@ -34,10 +35,10 @@ namespace VideoWallpaper
         // 版面照 macOS Tahoe 鎖定畫面的「正在播放」（400 × 198，約 2 : 1；沒有音量滑桿）：
         //   上面：封面、歌名和歌手，右上角歌詞圓鈕；中間：時間 — 進度條 — 剩下的時間（同一列）；
         //   最下面：隨機播放在最左、⏪ ⏸ ⏩ 放大置中（間隔約卡寬的 18%）、循環在最右。
-        // 封面圓角跟卡片同心：卡片 26 = 封面 10 + 邊距 16
-        const double CardW = 400, CardH = 198, CardPad = 16, ArtSize = 72, ArtRadius = 10, ColumnX = 100, ColumnW = 248;
+        // 封面圓角跟卡片同心：卡片 34 = 封面 18 + 邊距 16
+        const double CardW = 400, CardH = 198, CardPad = 16, ArtSize = 72, ColumnX = 100, ColumnW = 248;
         const double TitleY = 45, SubtitleY = 66, LyricsX = 370, LyricsY = 52, LyricsR = 14;
-        const double ProgressY = 114, ProgressX0 = 64, ProgressX1 = 336;   // 兩端的時間在進度條左右（時間 13，留給「12:34」「−12:34」的寬度）
+        const double ProgressY = 114, ProgressGap = 14;   // 兩端的時間在進度條左右，跟進度條的間隔兩邊一樣（見 ProgressEnds）
         const double ControlsY = 162, ShuffleX = 40, PrevX = 128, PlayX = 200, NextX = 272, RepeatX = 360;
 
         // 右下角：正在播放的歌（沒在播就回傳 null）。playing：播放鍵畫成暫停（剛按了播放暫停時，照按下去的樣子，不等播放器回報）。
@@ -57,10 +58,11 @@ namespace VideoWallpaper
 
             var art = DecodeArt(track.Art, (int)Math.Round(300 * s));
             card.Chrome = Layer(card, dc => DrawChrome(dc, card));
-            card.Info = Layer(card, dc => DrawInfo(dc, card, track));
+            card.CanPrev = track.CanPrev; card.CanNext = track.CanNext;
+            card.Info = Layer(card, dc => DrawInfo(dc, card, track), true);
             card.Buttons = RenderButtons(card, playing, shuffle, repeat);
             card.Cover = RenderCover(card, art);
-            card.Mic = Layer(card, dc => DrawLyricsIcon(dc, s, Brushes.White));
+            card.Mic = Layer(card, dc => DrawLyricsIcon(dc, s, Brushes.White), true);
             card.MicOn = Layer(card, dc => DrawLyricsIcon(dc, s, new SolidColorBrush(Color.FromRgb(40, 40, 46))));
 
             // 卡片的顏色：有封面就照封面的色相，沒有就用歌名算一個（每首歌都有顏色）
@@ -72,12 +74,14 @@ namespace VideoWallpaper
 
             Func<double, double> sx = x => card.InnerX + x * s;
             Func<double, double> sy = y => card.InnerY + y * s;
-            card.ProgressLeft = sx(ProgressX0); card.ProgressWidth = (ProgressX1 - ProgressX0) * s;
+            double px0, px1;
+            ProgressEnds(track.Duration.TotalSeconds, out px0, out px1);
+            card.ProgressLeft = sx(px0); card.ProgressWidth = (px1 - px0) * s;
             card.Spec = new VideoEngine.LiquidCardSpec
             {
                 X = card.InnerX, Y = card.InnerY, W = card.InnerW, H = card.InnerH, Radius = card.Radius, Scale = s,
                 TintR = tint.R / top, TintG = tint.G / top, TintB = tint.B / top,
-                ProgressX0 = sx(ProgressX0), ProgressX1 = sx(ProgressX1), ProgressY = sy(ProgressY),
+                ProgressX0 = sx(px0), ProgressX1 = sx(px1), ProgressY = sy(ProgressY),
                 LyricsX = sx(LyricsX), LyricsY = sy(LyricsY), LyricsR = LyricsR * s,
             };
 
@@ -89,12 +93,12 @@ namespace VideoWallpaper
             hit(NextX - 20, ControlsY - 18, 40, 36, "next");
             hit(RepeatX - 16, ControlsY - 18, 32, 36, "repeat");
             hit(LyricsX - 16, LyricsY - 16, 32, 32, "lyrics");
-            hit(ProgressX0 - 6, ProgressY - 10, ProgressX1 - ProgressX0 + 12, 20, "progress");
+            hit(px0 - 6, ProgressY - 10, px1 - px0 + 12, 20, "progress");
             return card;
         }
 
         // 兩端的時間（已經播了多久、還剩多久）：跟卡片其他圖一樣大小、一樣位置，每秒換一次；不知道歌曲長度就是 null
-        public static int[] RenderTime(MusicCard card, double position, double duration)
+        public static int[] RenderTime(MusicCard card, double position, double duration, bool halo = true)
         {
             if (card == null || duration <= 0) return null;
             position = Math.Max(0, Math.Min(duration, position));
@@ -104,9 +108,23 @@ namespace VideoWallpaper
                 var brush = new SolidColorBrush(Color.FromArgb(0xA6, 255, 255, 255));   // 白 65%（玻璃後面是亮的桌布也讀得清楚）
                 // 跟進度條同一列（字的中線對齊進度條）：左邊已經播了多久、右邊還剩多久
                 DrawText(dc, Clock(position), 13 * s, FontWeights.Medium, brush, CardPad * s, (ProgressY + 5) * s, double.MaxValue, false);
-                DrawText(dc, "−" + Clock(duration - position), 13 * s, FontWeights.Medium, brush, (CardW - CardPad) * s, (ProgressY + 5) * s, double.MaxValue, true);
-            });
+                // 剩下的時間用「歌長的秒數 − 已播的秒數」：兩邊加起來一定等於歌長（直接取 duration − position 的整數會差 1 秒）
+                DrawText(dc, "−" + Clock(Math.Floor(duration) - Math.Floor(position)), 13 * s, FontWeights.Medium, brush, (CardW - CardPad) * s, (ProgressY + 5) * s, double.MaxValue, true);
+            }, halo);
         }
+
+        // 進度條的兩端（1080p 的像素，以卡片左上角為 0）：兩端的時間貼著卡片的內距，進度條在中間，
+        // 跟左邊時間、右邊時間的間隔一樣是 ProgressGap（右邊多了「−」比較寬，進度條會稍微偏左一點，像 iOS 的排法）。
+        // 時間的寬度量這首歌最長的樣子（每個數字都當最寬的 0 算），播放中數字一直變，進度條不會跟著動
+        static void ProgressEnds(double duration, out double x0, out double x1)
+        {
+            string widest = System.Text.RegularExpressions.Regex.Replace(Clock(duration), "[0-9]", "0");
+            x0 = CardPad + Text(widest, 13, FontWeights.Medium, Brushes.White).Width + ProgressGap;
+            x1 = CardW - CardPad - Text("−" + widest, 13, FontWeights.Medium, Brushes.White).Width - ProgressGap;
+        }
+
+        // 進度條的長度什麼時候會變（歌曲長度跨過十分鐘、一小時…，時間多一位數）：這個值變了卡片要整張重畫
+        public static int ProgressLayout(double duration) { return Clock(duration).Length; }
 
         // 秒數 → 「3:07」（超過一小時「1:03:07」）
         static string Clock(double seconds)
@@ -116,8 +134,8 @@ namespace VideoWallpaper
                                      : string.Format(CultureInfo.InvariantCulture, "{0}:{1:00}", t.Minutes, t.Seconds);
         }
 
-        // 畫一張跟卡片其他圖一樣大小的圖：draw 裡的座標以卡片左上角為 0（螢幕像素）
-        static int[] Layer(MusicCard card, Action<DrawingContext> draw)
+        // 畫一張跟卡片其他圖一樣大小的圖：draw 裡的座標以卡片左上角為 0（螢幕像素）；halo：字和圖示帶很淡的暗色柔光（見 Halo）
+        static int[] Layer(MusicCard card, Action<DrawingContext> draw, bool halo = false)
         {
             var visual = new DrawingVisual();
             using (var dc = visual.RenderOpen())
@@ -126,7 +144,11 @@ namespace VideoWallpaper
                 draw(dc);
                 dc.Pop();
             }
-            return Snapshot(visual, card.Width, card.Height);
+            if (!halo) return Snapshot(visual, card.Width, card.Height);
+            visual.Effect = Halo(card.Scale);
+            var root = new ContainerVisual();   // 效果加在裡面那層（最外層的效果畫成圖時不一定會算進去）
+            root.Children.Add(visual);
+            return Snapshot(root, card.Width, card.Height);
         }
 
         // 歌名、「歌手 — 專輯」
@@ -135,7 +157,9 @@ namespace VideoWallpaper
             double s = card.Scale;
             string subtitle = string.IsNullOrEmpty(track.Album) || track.Album == track.Title ? track.Artist
                 : string.IsNullOrEmpty(track.Artist) ? track.Album : track.Artist + " — " + track.Album;
-            DrawText(dc, track.Title, 16 * s, FontWeights.SemiBold, Brushes.White, ColumnX * s, TitleY * s, ColumnW * s, false);
+            // 沒有副標（只有歌名的影片）：歌名改放在封面的中線上
+            double titleY = string.IsNullOrEmpty(subtitle) ? CardPad + ArtSize / 2 + 6 : TitleY;
+            DrawText(dc, track.Title, 16 * s, FontWeights.SemiBold, Brushes.White, ColumnX * s, titleY * s, ColumnW * s, false);
             DrawText(dc, subtitle, 13 * s, FontWeights.Normal, new SolidColorBrush(Color.FromArgb(0xB3, 255, 255, 255)), ColumnX * s, SubtitleY * s, ColumnW * s, false);
         }
 
@@ -143,7 +167,7 @@ namespace VideoWallpaper
         // shuffle / repeat：隨機播放、循環的狀態（null：播放器不支援，畫得很淡）
         public static int[] RenderButtons(MusicCard card, bool playing, bool? shuffle, int? repeat)
         {
-            return Layer(card, dc => DrawButtons(dc, card, playing, shuffle, repeat));
+            return Layer(card, dc => DrawButtons(dc, card, playing, shuffle, repeat), true);
         }
 
         static void DrawButtons(DrawingContext dc, MusicCard card, bool playing, bool? shuffle, int? repeat)
@@ -151,20 +175,30 @@ namespace VideoWallpaper
             double s = card.Scale;
             // 照 macOS 的實心符號：圓角三角形（兩個接在一起是上一首 / 下一首）、圓角直條（暫停）；▶ 最亮，旁邊兩個淡一點
             var white = Brushes.White;
-            Action<double, double, Geometry> icon = (x, alpha, g) =>
+            Action<double, Geometry> icon = (x, g) =>
             {
                 dc.PushTransform(new TranslateTransform(x * s, ControlsY * s));
                 dc.PushTransform(new ScaleTransform(1.45 * s, 1.45 * s));   // macOS 的鍵比較大
-                dc.PushOpacity(alpha);
                 dc.DrawGeometry(white, null, g);
-                dc.Pop(); dc.Pop(); dc.Pop();
+                dc.Pop(); dc.Pop();
             };
-            icon(PrevX, 0.82, Skip(-1));
-            icon(PlayX, 0.95, playing ? Pause() : RoundedTriangle(-7.5, 18, 16.5, 1, 2.2));
-            icon(NextX, 0.82, Skip(1));
+            Action<double, Action> key = (alpha, draw) => { dc.PushOpacity(alpha); draw(); dc.Pop(); };
+            // 上一首 / 下一首：播放器現在不能跳（例如單支影片）就很淡
+            key(card.CanPrev ? 0.82 : 0.3, () => icon(PrevX, Skip(-1)));
+            key(0.95, () => { if (playing) DrawPause(dc, s); else icon(PlayX, RoundedTriangle(-7.5, 18, 16.5, 1, 2.2)); });
+            key(card.CanNext ? 0.82 : 0.3, () => icon(NextX, Skip(1)));
             // 隨機播放、循環（Segoe 的圖示）：開著是全白、下面一個小點；關著半透明；播放器不支援就很淡
             mode(dc, s, ShuffleX, "\uE8B1", shuffle.HasValue, shuffle == true);
             mode(dc, s, RepeatX, repeat == 1 ? "\uE8ED" : "\uE8EE", repeat.HasValue, repeat.HasValue && repeat.Value != 0);
+        }
+
+        // 暫停：兩條圓角直條，直接照整數像素畫（不經過 1.45 倍的縮放：縮放後四條邊都落在半個像素上，邊緣會糊）
+        static void DrawPause(DrawingContext dc, double s)
+        {
+            double bw = Math.Round(7.25 * s), gap = 2 * Math.Round(2.9 * s), bh = Math.Round(26 * s), r = 2.2 * s;
+            double cx = Math.Round(PlayX * s), top = Math.Round(ControlsY * s - bh / 2);
+            dc.DrawRoundedRectangle(Brushes.White, null, new Rect(cx - gap / 2 - bw, top, bw, bh), r, r);
+            dc.DrawRoundedRectangle(Brushes.White, null, new Rect(cx + gap / 2, top, bw, bh), r, r);
         }
 
         static readonly Typeface ModeIcons = new Typeface(new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
@@ -183,15 +217,6 @@ namespace VideoWallpaper
             var g = new GeometryGroup();
             g.Children.Add(RoundedTriangle(-11 * dir, 14, 11, dir, 1.7));
             g.Children.Add(RoundedTriangle(0, 14, 11, dir, 1.7));
-            g.Freeze();
-            return g;
-        }
-
-        static Geometry Pause()
-        {
-            var g = new GeometryGroup();
-            g.Children.Add(new RectangleGeometry(new Rect(-7, -9, 5, 18), 1.5, 1.5));
-            g.Children.Add(new RectangleGeometry(new Rect(2, -9, 5, 18), 1.5, 1.5));
             g.Freeze();
             return g;
         }
@@ -257,13 +282,14 @@ namespace VideoWallpaper
                 new Rect(half, half, card.InnerW - EdgeWidth, card.InnerH - EdgeWidth), r - half, r - half);
         }
 
-        // 一行字：基線在 (x, baseline)；right = true 時 x 是右端；超過 maxWidth 顯示「…」
+        // 一行字：基線在 (x, baseline)；right = true 時 x 是右端；超過 maxWidth 顯示「…」。
+        // 起點和基線都取整數（不是 1080p 時乘上比例會是小數，字落在半個像素上會糊）
         static void DrawText(DrawingContext dc, string text, double size, FontWeight weight, Brush brush, double x, double baseline, double maxWidth, bool right)
         {
             if (string.IsNullOrEmpty(text)) return;
             var ft = Text(text, size, weight, brush);
             if (maxWidth < double.MaxValue) { ft.MaxTextWidth = maxWidth; ft.MaxLineCount = 1; ft.Trimming = TextTrimming.CharacterEllipsis; }
-            dc.DrawText(ft, new Point(right ? x - ft.Width : x, baseline - ft.Baseline));
+            dc.DrawText(ft, new Point(Math.Round(right ? x - ft.Width : x), Math.Round(baseline) - ft.Baseline));
         }
 
         static FormattedText Text(string text, double size, FontWeight weight, Brush brush)

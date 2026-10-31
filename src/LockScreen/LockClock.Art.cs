@@ -29,21 +29,30 @@ namespace VideoWallpaper
             catch { return null; }
         }
 
-        // 封面：跟卡片其他圖一樣大小、一樣位置的一張圖，72 見方、圓角 10，底下淡淡的影子（往下 2、很柔）。
-        // 沒有封面：半透明方塊和音符
+        // 封面：跟卡片其他圖一樣大小、一樣位置的一張圖，72 見方，圓角跟卡片同心（卡片的圓角 − 內距），
+        // 跟卡片一樣是連續曲率的圓角（見 SmoothRect）；底下淡淡的影子（往下 2、很柔）。沒有封面：半透明方塊和音符
         static int[] RenderCover(MusicCard card, BitmapSource art)
         {
-            double s = card.Scale, size = Math.Round(ArtSize * s), radius = ArtRadius * s;
-            var image = new Border
+            double s = card.Scale, size = Math.Round(ArtSize * s), radius = Math.Max(4 * s, card.Radius - CardPad * s);
+            var image = new Border { Width = size, Height = size, Clip = SmoothRect(new Rect(0, 0, size, size), radius) };
+            // 影子加在外面一層（裡面那層被切成圓角，影子才會照著圓角的形狀）
+            var holder = new Border
             {
-                Width = size, Height = size, CornerRadius = new CornerRadius(radius),
+                Width = size, Height = size, Child = image,
                 Margin = new Thickness(card.InnerX - card.X + CardPad * s, card.InnerY - card.Y + CardPad * s, 0, 0),
                 HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
             };
             if (art != null)
             {
                 image.Background = new ImageBrush(art) { Stretch = Stretch.UniformToFill };
-                image.Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 12 * s, ShadowDepth = 2 * s, Direction = 270, Opacity = 0.35, Color = Colors.Black };
+                // 裡面一圈 1 像素的淡白細框（白 10%，沿著同樣的圓角）：深色的封面才不會跟深色的玻璃融在一起（Apple Music 的封面也有）
+                double edge = Math.Max(1, Math.Round(s));
+                image.Child = new System.Windows.Shapes.Path
+                {
+                    Data = SmoothRect(new Rect(edge / 2, edge / 2, size - edge, size - edge), Math.Max(0, radius - edge / 2)),
+                    Stroke = new SolidColorBrush(Color.FromArgb(0x1A, 255, 255, 255)), StrokeThickness = edge,
+                };
+                holder.Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 12 * s, ShadowDepth = 2 * s, Direction = 270, Opacity = 0.35, Color = Colors.Black };
                 RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
             }
             else
@@ -52,7 +61,7 @@ namespace VideoWallpaper
                 image.Child = new TextBlock { Text = "", FontFamily = IconFont, FontSize = 30 * s, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
             }
             var root = new Grid { Width = card.Width, Height = card.Height, UseLayoutRounding = true };
-            root.Children.Add(image);
+            root.Children.Add(holder);
             return Paint(root, card.Width, card.Height);
         }
 
@@ -178,12 +187,20 @@ namespace VideoWallpaper
                 brush.GradientStops.Add(new GradientStop(Hsl(ends[2], Math.Max(saturation, ends[3]), light, alpha), 1));
                 return brush;
             };
-            var corner = new CornerRadius(radius);
             var shine = new Grid { Width = cardW, Height = cardH, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
-            shine.Children.Add(new Border { CornerRadius = corner, BorderBrush = tinted(0.6, 0.62, 0xA0), BorderThickness = new Thickness(Math.Max(2, 3 * s)),
-                Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 16 * s } });   // 散得比較開的光
-            shine.Children.Add(new Border { CornerRadius = corner, BorderBrush = tinted(0.6, 0.7, 0x70), BorderThickness = new Thickness(Math.Max(1.5, 2 * s)),
-                Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 6 * s } });    // 貼著邊框的光，也是糊開的
+            // 邊框的光沿著卡片的形狀（跟玻璃一樣是連續曲率的圓角，見 SmoothRect）
+            Func<double, System.Windows.Shapes.Path> ring = thick => new System.Windows.Shapes.Path
+            {
+                Data = SmoothRect(new Rect(thick / 2, thick / 2, cardW - thick, cardH - thick), Math.Max(0, radius - thick / 2)), StrokeThickness = thick,
+            };
+            var wide = ring(Math.Max(2, 3 * s));
+            wide.Stroke = tinted(0.6, 0.62, 0xA0);
+            wide.Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 16 * s };   // 散得比較開的光
+            var near = ring(Math.Max(1.5, 2 * s));
+            near.Stroke = tinted(0.6, 0.7, 0x50);
+            near.Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 6 * s };    // 貼著邊框的光，也是糊開的
+            shine.Children.Add(wide);
+            shine.Children.Add(near);
             var glowRoot = new Border { Padding = new Thickness(pad), Child = shine, UseLayoutRounding = true };
             return new CardColor { Glow = Paint(glowRoot, width, height) };
         }

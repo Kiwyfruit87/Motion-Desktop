@@ -82,7 +82,7 @@ namespace VideoWallpaper
             public bool TryGet(string name, out Overlay o) { return overlays.TryGetValue(name, out o); }
             public void Put(string name, Overlay o)
             {
-                o.Follow = name.StartsWith("music", StringComparison.Ordinal) ? 2 : name.StartsWith("lyrics", StringComparison.Ordinal) ? 1 : 0;
+                o.Follow = name.StartsWith("music", StringComparison.Ordinal) || name.StartsWith("lyrics", StringComparison.Ordinal) ? 2 : 0;   // 歌詞在卡片的玻璃裡，跟卡片一起變形
                 o.ClockDigits = name == "clockDigits";
                 overlays[name] = o;
                 ordered = null;

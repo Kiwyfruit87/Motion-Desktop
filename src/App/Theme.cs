@@ -126,7 +126,7 @@ namespace VideoWallpaper
             r["SectionFill"]     = B(dark ? 0x14FFFFFF : 0x59FFFFFF);
             r["BarFill"]         = B(dark ? 0x0FFFFFFF : 0x40FFFFFF);   // 工具列：一塊清澈的玻璃（透鏡由第二層畫），底下只墊一點點白
             r["SegmentTrack"]    = B(dark ? 0x3D767680 : 0x1F767680);
-            r["SegmentSelected"] = B(dark ? 0xFF636366 : 0xFFFFFFFF);
+            r["SegmentSelected"] = dark ? Fill(0xFF6C6C70, 0xFF57575B) : Fill(0xFFFFFFFF, 0xFFF2F2F4);   // 上亮下暗一點（實機）
             r["KnobRim"]         = clear;
             r["ToggleOffFill"]   = B(dark ? 0x38FFFFFF : 0x6E787880);   // 淺色：白底上約 #C5C5C7（官方）
             r["ToggleOn"]        = B(dark ? 0xFF30D158 : 0xFF34C759);   // 深色 #30D158、淺色 #34C759

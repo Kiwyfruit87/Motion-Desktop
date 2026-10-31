@@ -58,11 +58,12 @@ namespace VideoWallpaper
             duration = track.Duration.TotalSeconds;
             canSeek = track.CanSeek;
             double position = scrubbing ? scrubSeconds : Position(track);
-            owner.Engine.SetLiquidProgress(owner.Primary.Handle, position, duration, playing, scrubbing);
+            owner.Engine.SetLiquidProgress(owner.Primary.Handle, position, duration, playing, scrubbing, canSeek);
             string key = duration > 0 ? Math.Floor(position) + "/" + Math.Floor(duration) : "";
             if (!force && key == shownTime) return;
             shownTime = key;
-            owner.SetCardLayer("musicTime", LockClock.RenderTime(card, position, duration), 0, 1, 0);
+            // 拖曳中時間一秒變好幾次：先不加柔光（柔光要整張重算，很慢），放開時再整張重畫一次
+            owner.SetCardLayer("musicTime", LockClock.RenderTime(card, position, duration, !scrubbing), 0, 1, 0);
         }
 
         // 現在播到第幾秒：剛跳過去、剛按了播放暫停的 1.5 秒內，照我們知道的位置往後推（播放器還沒回報）
@@ -113,7 +114,7 @@ namespace VideoWallpaper
             holdSeconds = scrubSeconds;
             heldAt = Environment.TickCount;
             NowPlaying.Seek(scrubSeconds);
-            Update(NowPlaying.Current, playing, false);
+            Update(NowPlaying.Current, playing, true);   // 時間整張重畫（拖曳中畫的沒有柔光）
         }
 
         void Scrub(int x)

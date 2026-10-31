@@ -12,6 +12,7 @@ namespace VideoWallpaper
         public Func<int, int, bool> Click;   // 回傳 true = 點到「正在播放」的按鈕，不要滑走
         public Action<int, int> Drag;        // 按著左鍵拖曳進度條（StartDrag 之後才會收到）
         public Action Drop;                  // 放開左鍵
+        public Action LyricsKey;             // L：打開 / 關掉歌詞
         public System.Drawing.Rectangle Bounds { get; private set; }
         bool dragging;
 
@@ -104,8 +105,9 @@ namespace VideoWallpaper
                         if (Drop != null) Drop();
                     }
                     return;
-                case 0x0100:   // WM_KEYDOWN：空白鍵 / Enter / Esc
+                case 0x0100:   // WM_KEYDOWN：空白鍵 / Enter / Esc 滑走；L 打開 / 關掉歌詞（按住不放的自動重複不算）
                     int key = m.WParam.ToInt32();
+                    if (key == 0x4C) { if ((m.LParam.ToInt64() & 0x40000000) == 0 && LyricsKey != null) LyricsKey(); return; }
                     if ((key == 0x20 || key == 0x0D || key == 0x1B) && Dismiss != null) Dismiss();
                     return;
                 case 0x0201:   // 滑鼠左鍵：點到卡片上的按鈕就控制播放器，其他地方就滑走
@@ -116,7 +118,8 @@ namespace VideoWallpaper
                 case 0x0204: case 0x0207:   // 滑鼠右鍵 / 中鍵
                     if (Dismiss != null) Dismiss();
                     return;
-                case 0x0312:   // WM_HOTKEY：鎖定畫面顯示時登記的空白鍵 / Enter / Esc（不管前景在哪個視窗都收得到）
+                case 0x0312:   // WM_HOTKEY：鎖定畫面顯示時登記的空白鍵 / Enter / Esc / L（不管前景在哪個視窗都收得到；登記編號就是按鍵代碼）
+                    if (m.WParam.ToInt32() == 0x4C) { if (LyricsKey != null) LyricsKey(); return; }
                     if (Dismiss != null) Dismiss();
                     return;
                 case 0x001C:   // WM_ACTIVATEAPP：被切到別的程式（Alt+Tab、Win 鍵、Ctrl+Alt+Del…）；lParam 是切過去的那個程式的執行緒

@@ -34,8 +34,9 @@ namespace VideoWallpaper
         // 照 iPhone 換分鐘、換點的錄影（兩個子代理量的）：
         //   字數一樣（12:50 → 12:51）：沒變的字整串滑到新位置，變了的字在原地抹掉、長出來；
         //   字數不同（12:59 → 1:00）：所有字都重做（舊字在舊位置抹掉、新字在新位置長出來，不滑動），慢 1.4 倍；
-        //   分三組錯開：時、分鐘十位（含冒號）、分鐘個位，各晚 0、0.10、0.15 秒（只有一組變時不延遲）；
-        //   新字是 0 或冒號由上往下長，其他由下往上（兩段錄影都符合；舊字照同一格的方向抹掉）
+        //   分組錯開：時、冒號、分鐘（十位和個位同時），各晚 0、0.10、0.15 秒（只有一組變時不延遲）；
+        //   新字是 0 或冒號由上往下長，其他由下往上（兩段錄影都符合；舊字照同一格的方向抹掉）；
+        //   分鐘的十位跟著個位的方向（1:09 → 1:10 兩個字一起由上往下，不會一上一下）
         public static float[] ClockSlots(ClockImage from, ClockImage to)
         {
             if (from == null || to == null || from.Time == to.Time || from.CharX == null || to.CharX == null) return null;
@@ -46,7 +47,7 @@ namespace VideoWallpaper
             for (int k = 0; k < b.Length; k++)
             {
                 float x0 = to.CharX[k], x1 = to.CharX[k + 1], cx = (x0 + x1) / 2;
-                float dir = b[k] == '0' || b[k] == ':' ? -1f : 1f;
+                float dir = Direction(b, k);
                 int j = k - (b.Length - a.Length);
                 if (same && a[j] == b[k])
                 {
@@ -61,7 +62,7 @@ namespace VideoWallpaper
                 for (int j = 0; j < a.Length; j++)
                 {
                     int k = j + (b.Length - a.Length);   // 新時間裡同一個位置（從右邊數）的字，決定方向
-                    float dir = k >= 0 && k < b.Length && (b[k] == '0' || b[k] == ':') ? -1f : 1f;
+                    float dir = k >= 0 && k < b.Length ? Direction(b, k) : 1f;
                     slots.AddRange(new[] { 2f, from.CharX[j], from.CharX[j + 1], (from.CharX[j] + from.CharX[j + 1]) / 2, 0f, GroupDelay(a.Length - 1 - j), dir, slow });
                 }
             // 只有一組在變：從 0 開始（最早的那組不延遲）
@@ -71,8 +72,15 @@ namespace VideoWallpaper
             return slots.Count / 8 <= 10 ? slots.ToArray() : null;
         }
 
-        // 從右邊數第幾個字屬於哪一組：個位 0.15 秒、十位和冒號 0.10 秒、時 0
-        static float GroupDelay(int fromRight) { return fromRight == 0 ? 0.15f : fromRight <= 2 ? 0.10f : 0f; }
+        // 新時間 b 的第 k 個字往哪個方向長（1 由下往上、−1 由上往下）：0 和冒號由上往下，其他由下往上；分鐘的十位照個位的
+        static float Direction(string b, int k)
+        {
+            char c = b.Length - 1 - k == 1 ? b[b.Length - 1] : b[k];
+            return c == '0' || c == ':' ? -1f : 1f;
+        }
+
+        // 從右邊數第幾個字屬於哪一組：分鐘的個位和十位 0.15 秒（同時換）、冒號 0.10 秒、時 0
+        static float GroupDelay(int fromRight) { return fromRight <= 1 ? 0.15f : fromRight == 2 ? 0.10f : 0f; }
 
         // 時間或天氣有變才需要重畫時鐘那張圖
         // now：同一個時間點（時間、日期都用它，跨過午夜的那一瞬間才不會兜不起來）

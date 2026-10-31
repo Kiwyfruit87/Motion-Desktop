@@ -25,25 +25,26 @@ namespace VideoWallpaper
         public static int ShadowPad(int screenHeight) { return (int)Math.Ceiling(30 * screenHeight / 1080.0); }
 
         // 卡片內距；歌詞跟卡片裡的內容左右對齊，所以寬度＝卡片寬度扣掉兩邊內距。
-        // 圓角 26 = 封面的圓角 10 + 內距 16（同心）
+        // 圓角 34（比封面的圓角 10 + 內距 16 = 26 的同心圓角大一點，看起來比較圓潤）
         public static double CardPadding(double s) { return Math.Round(16 * s); }
-        public static double CardRadius(double s) { return Math.Round(26 * s); }
+        public static double CardRadius(double s) { return Math.Round(34 * s); }
 
         // 卡片邊框線的寬度（見 DrawChrome 的玻璃邊緣）
         const double EdgeWidth = 1.5;
         public static double LyricsWidth(double s) { return Math.Round(368 * s); }   // 跟卡片裡面一樣寬（卡片 400 − 兩邊 16）
 
         // 把內容加上陰影畫成一張半透明圖（周圍留 pad 的空間給陰影）
-        static int[] ToPixels(FrameworkElement content, double s, double pad, out Border root, out int width, out int height)
+        // shadow = false：不加陰影（歌詞在卡片的玻璃裡，跟卡片上的字一樣不加）
+        static int[] ToPixels(FrameworkElement content, double s, double pad, out Border root, out int width, out int height, bool shadow = true)
         {
-            Wrap(content, s, pad, out root, out width, out height);
+            Wrap(content, s, pad, out root, out width, out height, shadow);
             return Snapshot(root, width, height);
         }
 
 
-        static void Wrap(FrameworkElement content, double s, double pad, out Border root, out int width, out int height)
+        static void Wrap(FrameworkElement content, double s, double pad, out Border root, out int width, out int height, bool shadow = true)
         {
-            content.Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 18 * s, ShadowDepth = 0, Opacity = 0.5, Color = Colors.Black };
+            if (shadow) content.Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 18 * s, ShadowDepth = 0, Opacity = 0.5, Color = Colors.Black };
             root = new Border { Padding = new Thickness(pad), Child = content, UseLayoutRounding = true };
             root.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             root.Arrange(new Rect(root.DesiredSize));
@@ -60,6 +61,41 @@ namespace VideoWallpaper
             var pixels = new int[width * height];
             bitmap.CopyPixels(pixels, width * 4, 0);
             return pixels;
+        }
+
+        // 字和圖示很淡、很寬的暗色柔光（Apple 鎖定畫面的字一直帶著）：深色桌布上看不出來，白色、很亮的桌布上白字才看得清楚
+        static System.Windows.Media.Effects.Effect Halo(double s)
+        {
+            return new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 8 * s, ShadowDepth = 0, Opacity = 0.22, Color = Colors.Black };
+        }
+
+        // Apple 的連續曲率圓角（跟液態玻璃的 SdBox 同一條曲線：從離角 1.5 倍圓角的地方開始彎的四次方超橢圓）。
+        // 圓角太大、放不下（1.5 倍超過短邊的一半）就用一般的圓角
+        public static Geometry SmoothRect(Rect rect, double radius)
+        {
+            double rc = 1.5 * radius;
+            if (radius <= 0 || rc > Math.Min(rect.Width, rect.Height) / 2 - 1) return new RectangleGeometry(rect, radius, radius);
+            // 四個角（順時針：左上、右上、右下、左下）：角的中心、往外的方向、從哪一端走到哪一端
+            var corners = new[]
+            {
+                new { X = rect.Left + rc, Y = rect.Top + rc, Sx = -1, Sy = -1, Reverse = false },
+                new { X = rect.Right - rc, Y = rect.Top + rc, Sx = 1, Sy = -1, Reverse = true },
+                new { X = rect.Right - rc, Y = rect.Bottom - rc, Sx = 1, Sy = 1, Reverse = false },
+                new { X = rect.Left + rc, Y = rect.Bottom - rc, Sx = -1, Sy = 1, Reverse = true },
+            };
+            const int steps = 24;
+            var points = new PointCollection();
+            foreach (var c in corners)
+                for (int i = 0; i <= steps; i++)
+                {
+                    double t = (c.Reverse ? steps - i : i) * Math.PI / 2 / steps;   // 超橢圓的參數式：(cos t)^½、(sin t)^½
+                    points.Add(new Point(c.X + c.Sx * rc * Math.Sqrt(Math.Cos(t)), c.Y + c.Sy * rc * Math.Sqrt(Math.Sin(t))));
+                }
+            var figure = new PathFigure { StartPoint = points[0], IsClosed = true, IsFilled = true };
+            figure.Segments.Add(new PolyLineSegment(points, true));
+            var geometry = new PathGeometry(new[] { figure });
+            geometry.Freeze();
+            return geometry;
         }
 
         // 把 element 排成 width × height 再畫成像素（預先乘好 alpha 的 BGRA）

@@ -166,16 +166,26 @@ float4 main(float2 uv : TEXCOORD) : COLOR
     float3 col;
     [branch] if (A.z < 0.0)
     {
-        // 透鏡（開關、分段控制按住時；照 iPhone 實機逐格量的）：中間清澈、放大約 1.2 倍；
-        // 邊緣一條往「外」取樣的折射帶，把透鏡外面的東西拉進邊緣（帶寬約透鏡高的 1/4，越往裡越小，不會折返成鏡像）；
-        // 兩端圓頭只彎一半；色散沿著邊緣的切線方向把 RGB 錯開（上緣左暖右冷、下緣相反）
-        float u = max(-h.d, 0.0), R = min(h.hs.x, h.hs.y);
-        float D = -A.z * 0.28 * R * exp(-u / (0.24 * R)) * (1.0 - smoothstep(0.5 * R, 0.9 * R, u));
-        D *= lerp(0.5, 1.0, abs(n.y)) * a;
-        float2 base = h.c + (p - h.c) / lerp(1.0, h.mag, smoothstep(0.15 * R, 0.6 * R, u) * a);   // 只放大中間
-        float2 off = n * D, cs = float2(n.y, -n.x) * D * B.x;
-        col = SharpFine(base + off);
-        [branch] if (dot(cs, cs) > 0.0025) { col.r = SharpFine(base + off + cs).r; col.b = SharpFine(base + off - cs).b; }   // 邊緣才有色散
+        // 透鏡（開關、分段控制按住時；照 iPhone 分頁列的錄影，幾個分析綜合起來的）：
+        //   整塊均勻放大（約 1.16 倍）；再加一段沿著法線的位移，上下直邊和左右圓頭方向相反——
+        //   直邊往外取樣（透鏡外面的東西出現在邊內：一條暗帶，軌道的邊線變成透鏡裡面一圈內框），最多約 0.22R、在 0.2R 深；
+        //     暗帶離外緣留一點（約 0.04R，一條細灰），中間厚、往兩端變薄；
+        //   圓頭往裡取樣，取樣的深度慢慢加深（每往裡 1 只多 0.35），到 0.7R 接回來：靠邊的內容被放大、彎成月牙形；
+        //     圓頭附近不疊整塊放大（不然內容又被推出去、擠成一條）；兩種邊照法線的方向平滑混合。
+        //   不加色散（實機不到 1 像素，看到的彩色是被拉長的內容）
+        float u = max(-h.d, 0.0), R = min(h.hs.x, h.hs.y), x = u / R;
+        float2 an = abs(n);
+        bool wide = h.hs.x >= h.hs.y;
+        float w = wide ? an.y : an.x;   // 直邊 1、圓頭的尖端 0
+        w = w * w * w;
+        float t = saturate((x - 0.04) / 0.36);
+        float along = abs(wide ? p.x - h.c.x : p.y - h.c.y) / max(abs(h.hs.x - h.hs.y), 1.0);   // 在直邊上的位置（中間 0、兩端 1）
+        float straight = -0.88 * t * (1.0 - t) * lerp(1.0, 0.45, smoothstep(0.3, 1.1, along));
+        float round = 0.455 * saturate(1.0 - x / 0.7);
+        float dIn = R * lerp(round, straight, w) * (-A.z) * a;   // 正的：往裡取樣
+        float magW = lerp(smoothstep(0.25 * R, 0.9 * R, u), 1.0, w);
+        float2 base = h.c + (p - h.c) / lerp(1.0, h.mag, a * magW);
+        col = SharpFine(base - n * dIn);
         edge = 0.0;   // 透鏡的邊緣不變亮、沒有環境反光（只有一圈細亮邊）
     }
     else
@@ -217,11 +227,13 @@ float4 main(float2 uv : TEXCOORD) : COLOR
     float3 env = Softer(p + n * 50.0);                              // 環境反光：越靠外緣越像鏡子
     col = lerp(col, env * 1.2 + 0.04, saturate(pow(edge, 3.0) * C.z * 0.6 * a));
     // 高光：外緣一條細亮線（左上、右下最亮），往內一點有很淡的反光
-    float rim = exp(dn), inner = exp(dn / D.z);
-    float ang = pow(abs(dot(n, float2(0.70710678, 0.70710678))), 1.5);
+    // 透鏡：亮線更細更亮（約 1～2 像素、很銳利）、四周差不多亮，沒有往內的淡反光（實機）
+    float lens = A.z < 0.0 ? 1.0 : 0.0;
+    float rim = exp(dn / lerp(1.0, 0.6, lens)), inner = exp(dn / D.z) * (1.0 - lens);
+    float ang = lerp(pow(abs(dot(n, float2(0.70710678, 0.70710678))), 1.5), 1.0, 0.6 * lens);
     float3 bg = Sharp(p);
     float3 hl = lerp(float3(1.0, 1.0, 1.0), saturate(lerp(Luma(bg).xxx, bg, 2.0)), 0.25);
-    col += C.y * a * hl * (rim * (0.12 + 0.88 * ang) * 0.6 + inner * ang * 0.1) * lerp(1.0, 0.45, style);
+    col += C.y * a * hl * (rim * (0.12 + 0.88 * ang) * 0.6 * (1.0 + lens) + inner * ang * 0.1) * lerp(1.0, 0.45, style);
     // 內陰影：上緣內側一條柔和的暗線（白色實心的旋鈕不畫）
     float io = D.y, du = Dist(p - float2(0.0, io));
     col *= 1.0 - D.x * smoothstep(-io, io * 0.3, du) * a * (1.0 - h.fill.a);

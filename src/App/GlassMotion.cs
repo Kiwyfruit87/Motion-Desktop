@@ -204,11 +204,11 @@ namespace VideoWallpaper
     }
 
     // 分段控制的選取（照 iOS 26 健身 App 分頁列的錄影，五個子代理逐格量的）：平常是畫在字下面的實心膠囊。
-    // 按住選取的那一格：抬起成透明透鏡（寬 1.23 倍、高 1.35 倍，上下超出軌道一點；裡面的字放大 1.2 倍），
+    // 按住選取的那一格：抬起成透明透鏡（寬 1.23 倍、高 1.22 倍＝軌道的約 1.1 倍，上下超出一點；裡面整塊放大 1.16 倍），
     //   抬起用 0.2 秒、會衝過頭約 6% 的彈簧；跟著手指（0.25 秒的彈簧，不回彈），兩端可以超出約格距的 15%（越拉越緊）；
     // 快速拖曳時變形，跟方向有關：往右扁寬、往左高窄，停下時反過來晃一下再平復（約 0.5 秒）；
-    // 放開：選「手指位置 + 0.1 秒的慣性」最近的那一格，從透鏡現在的位置和速度滑過去（0.38 / 0.78，會稍微衝過頭），
-    //   放開後約 0.07 秒就開始落回實心；點別格：抬起和移動同時開始（0.36 / 0.9），約 0.2 秒後開始落回（跟距離無關）
+    // 放開：選「手指位置 + 0.1 秒的慣性」最近的那一格，從透鏡現在的位置和速度滑過去（0.44 / 0.78，會稍微衝過頭；比實機慢一點），
+    //   放開後約 0.07 秒就開始落回實心；點別格：抬起和移動同時開始（0.46 / 0.9），約 0.26 秒後開始落回（跟距離無關）
     class GlassDrop
     {
         public readonly FrameworkElement Host;
@@ -241,9 +241,9 @@ namespace VideoWallpaper
             for (int i = 0; i < Items.Length; i++) if (Items[i].IsChecked == true) Selected = i;
             double half = Half, hh = Items[0].ActualHeight / 2;   // 用格子的高度（不能用 Host：選取塊變大會撐大它）
             double goal = Dragging ? DragX : CenterOf(root, Selected);
-            pos.Step(goal, Dragging ? 0.25 : Released ? 0.38 : 0.36, Dragging ? 0.9 : Released ? 0.78 : 0.9, dt);
+            pos.Step(goal, Dragging ? 0.25 : Released ? 0.44 : 0.46, Dragging ? 0.9 : Released ? 0.78 : 0.9, dt);   // 比實機（0.38 / 0.36）慢一點
             // 落回實心：照時間（放開後 0.07 秒、點別格 0.2 秒），不等滑到
-            if (Tapping) { if (tapAt < 0) tapAt = now; if (now - tapAt >= (Released ? 0.07 : 0.2)) Tapping = false; }
+            if (Tapping) { if (tapAt < 0) tapAt = now; if (now - tapAt >= (Released ? 0.07 : 0.26)) Tapping = false; }
             else tapAt = -1;
             bool up = Dragging || Tapping;
             lift.Step(up ? 1 : 0, 0.2, 0.7, dt);
@@ -260,8 +260,8 @@ namespace VideoWallpaper
             var c = Motion.Center(Host, root, true);
             X = pos.X + r; Y = c.Y;
             W = half * (1 + 0.23 * l) * sx * (1 - 0.1 * squeeze);
-            H = hh * (1 + 0.35 * l) * sy * (1 + 0.1 * squeeze);
-            Mag = 1 + 0.2 * Motion.Clamp01(l);   // 透鏡底下放大 1.2 倍（實機）；放大用 Catmull-Rom 取樣，字才不會粗糙
+            H = hh * (1 + 0.22 * l) * sy * (1 + 0.1 * squeeze);   // 透鏡高約軌道的 1.1 倍（實機）
+            Mag = 1 + 0.16 * Motion.Clamp01(l);   // 透鏡底下整塊放大 1.16 倍（實機）；放大用 Catmull-Rom 取樣，字才不會粗糙
             Lift = l;
             Shine = Motion.Clamp01(shine.X);
             SolidAmount = Motion.Clamp01(solid.X);
@@ -283,7 +283,7 @@ namespace VideoWallpaper
         public bool Lifted { get { return SolidAmount < 0.999; } }
 
         // 選取的樣子跟著透鏡走：字變粗的是透鏡最靠近的那一格（平常是選到的那一格）；
-        // 抬起時透鏡蓋到多少，字就染上多少強調色（像 iPhone 分頁列：透鏡蓋到哪裡、哪裡就是選取的顏色）
+        // 平常選到的那格是強調色，抬起時改成透鏡蓋到多少、就染上多少強調色（像 iPhone 分頁列：透鏡蓋到哪裡、哪裡就是選取的顏色）
         public void Mark(Visual root)
         {
             int at = Dragging || Tapping ? Nearest(root, X) : Selected;
@@ -298,7 +298,7 @@ namespace VideoWallpaper
                 if (Items[i].FontWeight != weight) Items[i].FontWeight = weight;
                 double cx = CenterOf(root, i), half = Items[i].ActualWidth / 2;
                 double cover = half <= 0 ? 0 : Motion.Clamp01((Math.Min(cx + half, X + W) - Math.Max(cx - half, X - W)) / (2 * half));
-                double k = cover * (1 - SolidAmount);
+                double k = Math.Max(cover * (1 - SolidAmount), i == Selected ? SolidAmount : 0);   // 平常：選到的那格是強調色
                 if (k < 0.01) { if (Items[i].ReadLocalValue(Control.ForegroundProperty) != DependencyProperty.UnsetValue) Items[i].ClearValue(Control.ForegroundProperty); continue; }
                 var color = Color.FromArgb((byte)(text.A + (accent.A - text.A) * k), (byte)(text.R + (accent.R - text.R) * k),
                     (byte)(text.G + (accent.G - text.G) * k), (byte)(text.B + (accent.B - text.B) * k));

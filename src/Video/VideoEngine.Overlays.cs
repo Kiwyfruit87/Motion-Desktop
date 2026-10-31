@@ -21,7 +21,7 @@ namespace VideoWallpaper
             public IntPtr DC, Bitmap, OldBitmap;  // GDI 的圖（退回 GDI 時）
             public int X, Y, W, H;
             public int Z;                         // 疊的順序（見 OverlayLayer）
-            public int Follow;                    // 鎖定畫面滑動時跟著卡片動：0 不動（時鐘）、1 跟著移動（卡片上方的歌詞）、2 跟著移動和變形（卡片本身）
+            public int Follow;                    // 鎖定畫面滑動時跟著卡片動：0 不動（時鐘）、1 只跟著移動、2 跟著移動和變形（卡片本身和玻璃裡的歌詞）
             public bool ClockDigits;              // 時鐘的實心數字：這一格畫出了玻璃數字就不畫（名字是 "clockDigits"）
             public Tween Fade = new Tween(1);     // 整張圖的不透明度（淡入淡出）
             public bool RemoveWhenFaded;          // 動畫做完就拿掉（淡出、滑出）
@@ -32,6 +32,18 @@ namespace VideoWallpaper
             // Shade：長圖每一列的亮度（跟著長圖一起捲動，null = 都一樣亮）；換的時候從 ShadeFrom 慢慢變過去
             public float[] Shade, ShadeFrom;
             public Tween ShadeMix = new Tween(1);
+            // 糊掉的長圖（只有 Direct2D）和每一列要糊多少（0～1，跟著長圖捲動；跟 Shade 一起慢慢換）
+            public IntPtr D2DBlur;
+            public float[] Blur, BlurFrom;
+            // 間奏的三個點（畫在露出那段的正中間、文字的左邊對齊 DotsLeft）：DotsStart 是間奏開始的時間（引擎的時鐘），
+            // 暫停時停在 DotsAt 毫秒；DotsLen 是間奏多長（秒）；DotsSize、DotsGap 是點的直徑和間距
+            public bool Dots, DotsPaused;
+            public long DotsStart;
+            public double DotsAt, DotsLen, DotsLeft, DotsSize, DotsGap;
+            // 畫面上三個點現在的亮度和整組的大小（平順地追到該有的樣子：拖進度條跳到別的位置時才不會一下子跳過去）
+            public double[] DotsShown;
+            public long DotsDrawnAt;
+            public bool DotsEasing;   // 還在追（暫停中也要繼續畫到追上）
             // 跟著重拍閃的光暈（卡片邊框的光）：平常看不到，亮度跟著 PulseLevel 亮起來再暗回去
             public bool Pulse;
             // 左右滑動（換歌時封面和文字的翻頁動畫），只在 Clip 範圍內看得到
@@ -45,11 +57,12 @@ namespace VideoWallpaper
             public bool GlassReady;
             public int BlurX, BlurY, BlurW, BlurH;
 
-            public bool Running(long now) { return Scroll.Running(now) || ShadeMix.Running(now) || Fade.Running(now) || Move.Running(now); }
+            public bool Running(long now) { return Scroll.Running(now) || ShadeMix.Running(now) || Fade.Running(now) || Move.Running(now) || Dots && (!DotsPaused || DotsEasing); }
 
             public void Release()
             {
                 if (D2DBitmap != IntPtr.Zero) { Marshal.Release(D2DBitmap); D2DBitmap = IntPtr.Zero; }
+                if (D2DBlur != IntPtr.Zero) { Marshal.Release(D2DBlur); D2DBlur = IntPtr.Zero; }
                 if (DC != IntPtr.Zero)
                 {
                     Native.SelectObject(DC, OldBitmap);
@@ -102,16 +115,19 @@ namespace VideoWallpaper
 
         // 捲動的疊圖（歌詞）：pixels 是整張長圖，畫面上從 (x, y) 開始只露出 viewH 高的一段，
         // 露出的是長圖從第 scroll 列開始的部分；mask 是露出那段每一列的亮度（0～1，固定在畫面上），
-        // shade 是長圖每一列的亮度（跟著長圖捲動，null = 都一樣亮），兩個相乘。出現時用 fadeMs 淡入
-        public void SetScrollOverlay(IntPtr hwnd, string name, int[] pixels, int width, int height, int x, int y, int viewH, float[] mask, float[] shade, double scroll, int fadeMs)
+        // shade 是長圖每一列的亮度（跟著長圖捲動，null = 都一樣亮），兩個相乘。出現時用 fadeMs 淡入。
+        // blurred 是糊掉的同一張長圖、blur 是每一列要往它混多少（都可以是 null：不糊；退回 GDI 時也不糊）
+        public void SetScrollOverlay(IntPtr hwnd, string name, int[] pixels, int[] blurred, int width, int height, int x, int y, int viewH, float[] mask, float[] shade, float[] blur, double scroll, int fadeMs)
         {
             WithTarget(hwnd, delegate(Target t, long now)
             {
                 var o = CreateOverlay(t, pixels, width, height, x, y);
+                if (t.D2D != null && blurred != null && blur != null) o.D2DBlur = t.D2D.CreateBitmap(blurred, width, height);
                 o.Z = OverlayLayer.Lyrics;
                 o.ViewH = viewH;
                 o.Mask = mask;
                 o.Shade = shade;
+                o.Blur = blur;
                 o.Scroll = new Tween(scroll);
                 o.Fade = new Tween(0, 1, now, fadeMs);
                 Replace(t, name, o);
@@ -141,8 +157,7 @@ namespace VideoWallpaper
                 {
                     if (old != null)
                     {
-                        double from = old.Move.Value(now);
-                        old.Move = new Tween(from, from - shift, now, ms);
+                        old.Move.Continue(old.Move.Value(now) - shift, ms, now);   // 接著原本的速度（連按兩次下一首時不會先停一下）
                         old.Fade.Retarget(0, ms, now);   // 一邊滑一邊淡出
                         old.RemoveWhenFaded = true;      // 淡完就拿掉
                         t.Put(name + "#" + now, old);
@@ -162,28 +177,82 @@ namespace VideoWallpaper
         }
 
         // 捲動到長圖的第 to 列（從目前畫面上的位置接著捲，花 ms 毫秒）；
-        // shade 不是 null 時，長圖每一列的亮度也在這段時間裡從現在的樣子慢慢變成 shade
-        public void ScrollOverlay(IntPtr hwnd, string name, double to, int ms, float[] shade = null)
+        // shade 不是 null 時，長圖每一列的亮度也在這段時間裡從現在的樣子慢慢變成 shade（blur 也一樣：每一列糊多少）
+        public void ScrollOverlay(IntPtr hwnd, string name, double to, int ms, float[] shade = null, float[] blur = null)
         {
             WithOverlay(hwnd, name, delegate(Overlay o, long now)
             {
-                o.Scroll.Retarget(to, ms, now);
+                o.Scroll.Continue(to, ms, now);   // 接著原本的速度捲（歌詞很快換行、拖進度條時不會停一下）
                 if (shade == null) return;
-                o.ShadeFrom = ShadeAt(o, now);
+                o.ShadeFrom = MixAt(o.ShadeFrom, o.Shade, o.ShadeMix, now);
+                o.BlurFrom = MixAt(o.BlurFrom, o.Blur, o.ShadeMix, now);
                 o.Shade = shade;
+                if (blur != null) o.Blur = blur;
                 o.ShadeMix = new Tween(0, 1, now, ms);
             });
         }
 
-        // 長圖每一列現在的亮度（換的過程中是新舊兩份混在一起的樣子）
-        static float[] ShadeAt(Overlay o, long now)
+        // 長圖每一列現在的值（換的過程中是新舊兩份混在一起的樣子）
+        static float[] MixAt(float[] from, float[] to, Tween mixing, long now)
         {
-            if (o.ShadeFrom == null || o.Shade == null || !o.ShadeMix.Running(now)) return o.Shade;
-            double mix = o.ShadeMix.Value(now);
-            var current = new float[o.Shade.Length];
-            for (int i = 0; i < current.Length; i++) current[i] = (float)(o.ShadeFrom[i] + (o.Shade[i] - o.ShadeFrom[i]) * mix);
+            if (from == null || to == null || !mixing.Running(now)) return to;
+            double mix = mixing.Value(now);
+            var current = new float[to.Length];
+            for (int i = 0; i < current.Length; i++) current[i] = (float)(from[i] + (to[i] - from[i]) * mix);
             return current;
         }
+
+        // 歌詞唱到間奏（Apple Music 的三個點）：on = false 拿掉。elapsed：間奏已經過了幾秒；length：間奏多長（秒）；
+        // playing = false 時停在 elapsed 那一刻。left：點從長圖的第幾欄開始（跟文字的左邊對齊）；size、gap：點的直徑和間距
+        public void SetLyricsDots(IntPtr hwnd, string name, bool on, double elapsed, double length, bool playing, double left, double size, double gap)
+        {
+            WithOverlay(hwnd, name, delegate(Overlay o, long now)
+            {
+                if (!on || !o.Dots) o.DotsShown = null;   // 新的一段間奏：從該有的樣子開始（不用追）
+                o.Dots = on;
+                o.DotsPaused = !playing;
+                o.DotsAt = elapsed * 1000;
+                o.DotsStart = now - (long)(elapsed * 1000);
+                o.DotsLen = length;
+                o.DotsLeft = left; o.DotsSize = size; o.DotsGap = gap;
+            });
+        }
+
+        // 三個點：間奏開始時從左邊長出來（0.45 秒），三個點依序從淡變亮（各佔間奏的三分之一），整組慢慢地呼吸（大小 ±6%、1.8 秒一次），
+        // 快結束時縮回去（下一句前 0.2～0.65 秒）；暫停時停在那一刻。
+        // 拖進度條跳到間奏的別的地方：亮度和大小在約 0.2 秒內平順地變過去（例如從三個都亮退回只亮第一個）
+        static void DrawDots(OverlayCanvas canvas, Overlay o, long now, double fade)
+        {
+            double t = (o.DotsPaused ? o.DotsAt : now - o.DotsStart) / 1000.0, len = o.DotsLen;
+            double fillLen = Math.Max(0.5, len - 0.65);
+            var goal = new double[4];
+            for (int i = 0; i < 3; i++) goal[i] = 0.35 + 0.65 * Ease(t / fillLen * 3 - i);
+            goal[3] = Ease(t / 0.45) * Ease((len - 0.2 - t) / 0.45) * (1 + 0.06 * Math.Sin(2 * Math.PI * t / 1.8));   // 長出來、縮回去、呼吸
+            if (o.DotsShown == null) o.DotsShown = goal;
+            else
+            {
+                double follow = 1 - Math.Exp(-Math.Max(0, now - o.DotsDrawnAt) / 70.0);   // 時間常數 0.07 秒（約 0.2 秒到位）
+                for (int i = 0; i < 4; i++) o.DotsShown[i] += (goal[i] - o.DotsShown[i]) * follow;
+            }
+            o.DotsDrawnAt = now;
+            o.DotsEasing = false;
+            for (int i = 0; i < 4; i++) if (Math.Abs(goal[i] - o.DotsShown[i]) > 0.004) o.DotsEasing = true;
+            double k = o.DotsShown[3];
+            if (k <= 0.01) return;
+            double size = o.DotsSize * k, gap = o.DotsGap * k, cy = o.Y + o.ViewH / 2.0;
+            double alpha = fade * o.Mask[o.ViewH / 2];
+            for (int i = 0; i < 3; i++)
+            {
+                double x = o.X + o.DotsLeft + i * (size + gap);
+                canvas.FillSolid(x, cy - size / 2, size, size, size / 2, 1, 1, 1, Math.Min(1, alpha * o.DotsShown[i]));
+            }
+        }
+
+        // 畫面上第 y 列在玻璃裡多少（玻璃上緣 top 以上 0；往下 fade 的距離內平順地變到 1）
+        static double InGlass(double y, double top, double fade) { return Ease((y - top - 4) / fade); }
+
+        // 0～1 之間平順地進出（超出範圍夾住）
+        static double Ease(double x) { x = Math.Max(0, Math.Min(1, x)); return x * x * (3 - 2 * x); }
 
         // 淡入 / 淡出到 to（0～1）；remove = true 時淡出完就拿掉
         public void FadeOverlay(IntPtr hwnd, string name, double to, int ms, bool remove)
@@ -311,8 +380,14 @@ namespace VideoWallpaper
                 double fade = o.Fade.Value(now);
                 if (fade <= 0.004) continue;
                 Follow(t, canvas, o.Follow, ref follow);
-                if (o.Pulse) fade *= glow;   // 邊框的光暈：只在重拍時亮
+                if (o.Pulse) fade *= 0.7 * glow;   // 邊框的光暈：只在重拍時亮，最亮 70%（像呼吸，不是閃）
                 if (fade <= 0.004) continue;
+                if (o.Pulse && t.Liquid != null && (Math.Abs(t.Liquid.Extended) > 0.5 || Math.Abs(t.Liquid.Wobbled) > 0.0005))
+                {
+                    // 歌詞顯示時卡片的玻璃往上延伸、左右彈：光暈跟著玻璃的形狀（上緣往上挪 Extended、左右各挪寬度的一半 × Wobbled）
+                    canvas.ImageGrown(o, t.Liquid.Spec.W / 2 * t.Liquid.Wobbled, t.Liquid.Extended, Math.Min(1, fade));
+                    continue;
+                }
                 if (o.ViewH == 0)
                 {
                     canvas.Glass(o, Math.Min(1, fade));
@@ -322,24 +397,34 @@ namespace VideoWallpaper
                     if (o.Clip) canvas.PopClip(clip);
                     continue;
                 }
-                // 捲動的疊圖：每 2 列一條，各自用遮罩（畫面上的位置）和長圖那幾列的亮度貼上去
+                // 捲動的疊圖：每 2 列一條，各自用遮罩（畫面上的位置）和長圖那幾列的亮度貼上去；
+                // 有糊掉的長圖時，照那幾列要糊多少，清楚的和糊掉的兩張交叉淡入淡出（Apple Music：離目前這行越遠越糊）
                 double top = canvas.Snap(o.Scroll.Value(now));
                 bool mixing = o.Shade != null && o.ShadeFrom != null && o.ShadeMix.Running(now);
-                double mix = mixing ? o.ShadeMix.Value(now) : 1;
+                bool blurMixing = o.Blur != null && o.BlurFrom != null && o.ShadeMix.Running(now);
+                double mix = mixing || blurMixing ? o.ShadeMix.Value(now) : 1;
+                bool blurred = o.D2DBlur != IntPtr.Zero && o.Blur != null;
+                // 歌詞在卡片的玻璃裡：只畫到玻璃現在長到的地方（玻璃往上長、縮回去的途中，上緣以上的字不會先跑出來），
+                // 靠近上緣的那段柔和地淡出
+                var lc = o.Follow == 2 ? t.Liquid : null;
+                double glassTop = lc != null && lc.Spec != null ? lc.Spec.Y - lc.Extended : double.MinValue;
+                double glassFade = lc != null && lc.Spec != null ? 14 * lc.Spec.Scale : 1;
                 for (int row = 0; row < o.ViewH; row += 2)
                 {
                     int h = Math.Min(2, o.ViewH - row);
                     double source = top + row;
                     if (source < 0 || source + h > o.H) continue;
-                    double alpha = fade * o.Mask[row];
-                    if (o.Shade != null)
-                    {
-                        int at = Math.Min(o.H - 1, (int)(source + h / 2.0));
-                        alpha *= mixing ? o.ShadeFrom[at] + (o.Shade[at] - o.ShadeFrom[at]) * mix : o.Shade[at];
-                    }
+                    double alpha = fade * o.Mask[row] * InGlass(o.Y + row + h / 2.0, glassTop, glassFade);
+                    int at = Math.Min(o.H - 1, (int)(source + h / 2.0));
+                    if (o.Shade != null) alpha *= mixing ? o.ShadeFrom[at] + (o.Shade[at] - o.ShadeFrom[at]) * mix : o.Shade[at];
                     if (alpha <= 0.004) continue;
-                    canvas.Strip(o, row, h, source, Math.Min(1, alpha));
+                    double b = !blurred ? 0 : blurMixing ? o.BlurFrom[at] + (o.Blur[at] - o.BlurFrom[at]) * mix : o.Blur[at];
+                    // 先畫糊的、再把清楚的疊上去。一般的疊法下面那張會被上面那張蓋掉一部分，兩張交叉淡換的途中字會變暗：
+                    // 清楚的那張照糊的那張平均蓋掉的比例補回來（糊掉的字筆畫散開，透明度大約只剩 0.3）
+                    if (b > 0.004) canvas.StripBlurred(o, row, h, source, Math.Min(1, alpha * b));
+                    if (b < 0.996) canvas.Strip(o, row, h, source, Math.Min(1, alpha * (1 - b) / (1 - 0.3 * Math.Min(1, alpha * b))));
                 }
+                if (o.Dots) DrawDots(canvas, o, now, fade * InGlass(o.Y + o.ViewH / 2.0, glassTop, glassFade));
             }
             if (controlsPending) DrawControls(t, canvas, ref follow);
             if (topPending) DrawTop(t, canvas, ref follow);
