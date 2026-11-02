@@ -66,6 +66,9 @@ namespace VideoWallpaper
             owner.SetCardLayer("musicTime", LockClock.RenderTime(card, position, duration, !scrubbing), 0, 1, 0);
         }
 
+        // 卡片上顯示的位置（秒）：拖曳中是手指拖到的地方，其他時候同 Position（歌詞跟著它捲）
+        public double ShownSeconds(NowPlaying.Track track) { return scrubbing ? scrubSeconds : Position(track); }
+
         // 現在播到第幾秒：剛跳過去、剛按了播放暫停的 1.5 秒內，照我們知道的位置往後推（播放器還沒回報）
         double Position(NowPlaying.Track track)
         {

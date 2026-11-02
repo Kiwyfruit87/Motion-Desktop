@@ -48,6 +48,10 @@ namespace VideoWallpaper
         // 歌詞放在卡片的正上方
         public void Anchor(int top, int left) { cardTop = top; cardLeft = left; }
 
+        // 歌詞開著沒、能不能開關（這首有歌詞）
+        public bool On { get { return on; } }
+        public bool CanToggle { get { return Lyrics.Has(lyrics); } }
+
         // 按歌詞按鈕：有歌詞才開關（先讓歌詞開始淡入 / 淡出，按鈕的樣子由呼叫的人更新）；回傳有沒有切換
         public bool Toggle()
         {
@@ -147,8 +151,10 @@ namespace VideoWallpaper
             int line = CurrentLine(track);
             if (line != shownLine)
             {
-                // 換行：平順地往上捲，亮的那行（和糊的程度）同時換過去；一次跳好幾行（拖曳進度）就捲快一點
-                int ms = Math.Abs(line - shownLine) > 2 ? 250 : 420;
+                // 換行：平順地往上捲，亮的那行（和糊的程度）同時換過去。
+                // 一次跳好幾行（放開進度條、播放器跳轉）：慢慢地滑過去再停下（0.6 秒），不是一下子跳到；
+                // 正在拖進度條：歌詞稍微落後手指、緩緩地跟上（0.45 秒；還沒捲完又換行時從現在的位置接著捲），不會一格一格卡住
+                int ms = owner.Scrubbing ? 450 : Math.Abs(line - shownLine) > 2 ? 600 : 420;
                 shownLine = line;
                 owner.Engine.ScrollOverlay(owner.Primary.Handle, sheetName, ScrollFor(line), ms, ShadeFor(line), BlurFor(line));
             }
@@ -176,12 +182,13 @@ namespace VideoWallpaper
                 dotsLine = -1;
                 return;
             }
-            double elapsed = NowPlaying.PositionSeconds(track) - start;
+            double elapsed = owner.SongPosition(track) - start;
+            bool running = track.Playing && !owner.Scrubbing;   // 拖進度條時三個點停在拖到的地方
             double drawing = dotsElapsed + (dotsPlaying ? (Environment.TickCount - dotsSentAt) / 1000.0 : 0);   // 引擎現在畫到間奏的第幾秒
-            if (line == dotsLine && track.Playing == dotsPlaying && Math.Abs(elapsed - drawing) < 0.25) return;
-            dotsLine = line; dotsPlaying = track.Playing; dotsElapsed = elapsed; dotsSentAt = Environment.TickCount;
+            if (line == dotsLine && running == dotsPlaying && Math.Abs(elapsed - drawing) < 0.25) return;
+            dotsLine = line; dotsPlaying = running; dotsElapsed = elapsed; dotsSentAt = Environment.TickCount;
             double s = primary.Bounds.Height / 1080.0;
-            owner.Engine.SetLyricsDots(primary.Handle, sheetName, true, elapsed, end - start, track.Playing,
+            owner.Engine.SetLyricsDots(primary.Handle, sheetName, true, elapsed, end - start, running,
                 LockClock.ShadowPad(primary.Bounds.Height), 10 * s, 7 * s);
         }
 
@@ -197,11 +204,12 @@ namespace VideoWallpaper
             return sheetLyrics.Synced ? LockClock.LyricsBlur(sheetLyrics.SheetHeight, lineCenters, lineHeights, lineSpacing, line) : null;
         }
 
-        // 現在唱到第幾行（-1 = 還沒開始唱）；稍微提早 0.2 秒，捲動完剛好對上
+        // 現在唱到第幾行（-1 = 還沒開始唱）；播放中稍微提早 0.2 秒，捲動完剛好對上（拖進度條時就照拖到的地方）。
+        // 位置跟卡片上的進度條一樣（剛跳過去、播放器還沒回報時也是新的位置）
         int CurrentLine(NowPlaying.Track track)
         {
             if (track == null) return -1;
-            double now = NowPlaying.PositionSeconds(track) + 0.2;
+            double now = owner.SongPosition(track) + (owner.Scrubbing ? 0 : 0.2);
             var lines = sheetLyrics.Lines;
             int line = -1;
             while (line + 1 < lines.Count && lines[line + 1].Time <= now) line++;

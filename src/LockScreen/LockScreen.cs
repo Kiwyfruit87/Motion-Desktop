@@ -50,6 +50,10 @@ namespace VideoWallpaper
         }
 
         public bool Active { get; private set; }
+
+        // 卡片上顯示的播放位置（秒；拖進度條時是拖到的地方）、是不是正在拖：歌詞照這個捲
+        public double SongPosition(NowPlaying.Track track) { return progress.ShownSeconds(track); }
+        public bool Scrubbing { get { return progress.Scrubbing; } }
         // 完全蓋住所有螢幕（滑進來之後、開始滑走之前）：這段時間桌面上的影片看不到，不用畫
         public bool Covering { get; private set; }
         public Action ActiveChanged;   // 打開、收起來、開始 / 不再完全蓋住桌面時
@@ -374,7 +378,24 @@ namespace VideoWallpaper
             touching = false;
             pressed = -1;
             if (pressWatch != null) pressWatch.Stop();
+            if (lyricsArmed)
+            {
+                // 放開歌詞圓鈕：照按了多久決定力道（0.09 秒內是輕點、力道 0；到 0.6 秒蓄滿，先快後慢），按在哪一邊決定往哪邊鼓
+                lyricsArmed = false;
+                double held = Math.Max(0, Math.Min(1, (Environment.TickCount - lyricsArmedAt - 90) / 510.0));
+                if (engine != null && primary != null)
+                {
+                    engine.LaunchLiquid(primary.Handle, 1 - (1 - held) * (1 - held), lyricsArmedDir);
+                    if (lyrics.Toggle()) Refresh(false);
+                    else engine.ChargeLiquid(primary.Handle, false);   // 放開前歌詞不見了（換歌）：取消蓄力
+                }
+            }
         }
+
+        // 按住歌詞圓鈕準備打開歌詞：什麼時候按的、按在圓鈕的哪一邊（−1 左緣、1 右緣）
+        bool lyricsArmed;
+        int lyricsArmedAt;
+        double lyricsArmedDir;
 
         // 重拍時邊框的光暈（跟著專輯封面的顏色）：換歌顏色變了就慢慢換過去（跟翻頁一樣 0.45 秒），卡片剛出現或拿掉時直接換
         void ShowCardColor(LockClock.MusicCard c)
@@ -442,7 +463,15 @@ namespace VideoWallpaper
                     Touch(x, y, b.Value == "lyrics" ? VideoEngine.LyricsButton : -1);
                     if (b.Value == "lyrics")
                     {
-                        if (lyrics.Toggle()) Refresh(false);   // 歌詞先開始淡入 / 淡出，再更新按鈕的樣子
+                        // 打開：先蓄力（卡片上緣往下壓），放開時照按了多久、按在圓鈕的哪一邊彈上去（見 Release）；關掉：馬上收回
+                        if (!lyrics.On && lyrics.CanToggle)
+                        {
+                            lyricsArmed = true;
+                            lyricsArmedAt = Environment.TickCount;
+                            lyricsArmedDir = Math.Max(-1, Math.Min(1, (x - (b.Key.X + b.Key.Width / 2)) / (b.Key.Width / 2)));
+                            engine.ChargeLiquid(primary.Handle, true);
+                        }
+                        else if (lyrics.Toggle()) Refresh(false);   // 歌詞先開始淡入 / 淡出，再更新按鈕的樣子
                     }
                     else if (b.Value == "progress") progress.OnPressed(x);
                     else if (b.Value == "shuffle" || b.Value == "repeat") ToggleMode(b.Value);
@@ -523,6 +552,7 @@ namespace VideoWallpaper
             expectShuffle = null; expectRepeat = null;
             touching = false;
             pressed = -1;
+            lyricsArmed = false;   // 按著歌詞圓鈕時被收掉：不打開歌詞
             if (pressWatch != null) pressWatch.Stop();
             progress.Stop();
             card = null;

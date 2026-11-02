@@ -44,12 +44,16 @@ namespace VideoWallpaper
             V0 = 0;
         }
 
-        // 同上，但接著現在的速度（捲動、滑動途中又換目標時不會先停一下再重新加速）
+        // 同上，但接著現在的速度（捲動、滑動途中又換目標時不會先停一下再重新加速）。
+        // 接著的速度有上限：最多「距離 / 時間」（這樣不會衝過目標再退回來）；新目標在反方向時只接三成（先順順地慢下來再回頭）。
+        // 不限的話，拖進度條時歌詞捲得很快，剛好換到下一行（距離只有一行）會帶著整串的速度衝過頭好幾行再彈回來
         public void Continue(double to, int ms, long now)
         {
             double v = Velocity(now);
             Retarget(to, ms, now);
-            V0 = v;
+            double d = to - From, max = ms > 0 ? Math.Abs(d) / ms : 0;
+            if (v * d < 0) max *= 0.3;
+            V0 = Math.Max(-max, Math.Min(max, v));
         }
 
         // 停在現在的值

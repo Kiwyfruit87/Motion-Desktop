@@ -32,6 +32,7 @@ namespace VideoWallpaper
             public float Refract = 0.9f, Bevel = 20, CA = 0.06f, Scatter = 0.86f, Sat = 1.5f, TintAmt = 0.3f;
             public float Legible = 0.3f, Spec = 0.85f, Reflect = 0.3f, Merge = 6, InnerA = 0.06f, InnerR = 8, Inner = 6, Dim = 0;
             public float TouchX, TouchY, TouchGlow, TouchRadius;   // 按住時從手指下面亮起來（亮度 0 就沒有）
+            public float Touch2X, Touch2Y, Touch2Glow, Touch2Radius;   // 上一次按的白光還在退（很快又按一下時，新的從手指重新擴散、舊的照常退）
             // 1：卡片的液態玻璃：中央輕輕糊（Scatter）、鮮一點（Sat）、一層很淡帶環境色調的光（TintAmt），不放大；
             // 外圍一圈（Bevel）像液體的彎月面往外取樣、把外面的東西壓進來（Refract；上下直邊和圓角打折），燈經過那圈會聚光變亮，最外緣一點色散（CA）；
             // 約 1 像素的細高光（上緣和左上最亮）、內側淡淡提亮、最外緣映著環境的細線（Spec 是強度）；左上的環境反光、很淡的玻璃厚度
@@ -68,6 +69,7 @@ cbuffer GlassInfo : register(b0)
     float4 D;          // 內陰影濃度、內陰影寬度、往內反光的寬度、變暗
     float4 Touch;      // 按住：手指的位置 xy、亮度 z、擴散的半徑 w
     float4 E;          // 清澈的卡片玻璃（1）、背景很雜時中央的散射、靠邊的散射、（不用）
+    float4 Touch2;     // 上一次按的白光還在退：位置 xy、亮度 z、半徑 w（跟 Touch 取亮的那個，不會疊得更亮）
 };
 cbuffer PassInfo : register(b1)
 {
@@ -329,6 +331,20 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
         // （每個通道先加一點底再相除：純色、全黑的環境比值才會是 1，不會把某個通道放大好幾倍；倍率再夾在 0.9～1.15）
         float3 crel = (camb + 0.03) / (cavg + 0.03);
         ccol = saturate(ccol * clamp(lerp(float3(1.0, 1.0, 1.0), crel / max(Luma(crel), 0.05), 0.09 * a), 0.9, 1.15));
+        // 中央的環境色：玻璃後面這一帶（最糊的那張，約 50 像素的範圍）比整張卡片後面的平均色（卡片裡五點）偏哪個顏色，就在玻璃裡再偏一點
+        // （燈那邊微暖、冷色的背景那邊微冷，過渡跟著最糊的那張一樣平順）。大家共有的那層色調不動（只在中央收的話，單色的桌布上中央會比外圈灰、看得出一個框）。
+        // 只動色度、亮度不變（色度的亮度是 0），整體飽和度也不提高——同樣是深色霧面，只是顏色有空間上的深淺，不是一層均勻的棕。
+        // 只在中央（外圍那圈有自己的折射、反光）；色度照這一點跟後面那一帶的亮度比例縮（暗的灰色上不會憑空推出互補色），很暗的地方再少一點
+        float2 cio = Shape[0].zw * float2(0.6, 0.5);
+        float3 cin = 0.2 * (BlurBTex.SampleLevel(Lin, (cmid - BlurRect.xy) / BlurRect.zw, 0).rgb
+            + BlurBTex.SampleLevel(Lin, (cmid + cio - BlurRect.xy) / BlurRect.zw, 0).rgb + BlurBTex.SampleLevel(Lin, (cmid - cio - BlurRect.xy) / BlurRect.zw, 0).rgb
+            + BlurBTex.SampleLevel(Lin, (cmid + float2(cio.x, -cio.y) - BlurRect.xy) / BlurRect.zw, 0).rgb + BlurBTex.SampleLevel(Lin, (cmid + float2(-cio.x, cio.y) - BlurRect.xy) / BlurRect.zw, 0).rgb);
+        float3 cdev = (cwide - Luma(cwide)) - (cin - Luma(cin));
+        float cmidK = smoothstep(0.3 * bev, bev, cu) * (0.4 + 0.6 * smoothstep(0.03, 0.25, Luma(ccol))) * saturate(Luma(ccol) / max(Luma(cwide), 0.03)) * a;
+        // （差得越多放大得越少：本來就很明顯的冷暖、顏色不會被推成色塊，主要是把細微的變化帶出來）。
+        // 加完以後色度的大小最多比原本多 3%：顏色只是往附近環境的方向轉（燈旁邊暖一點、冷的那邊棕色退一點），不會整片變鮮
+        float3 cc0 = ccol - Luma(ccol), cc1 = cc0 + 0.3 * cdev / (1.0 + 3.0 * length(cdev)) * cmidK;
+        ccol = saturate(Luma(ccol) + cc1 * min(1.0, 1.03 * length(cc0) / max(length(cc1), 1e-4)));
         // 玻璃的深度：越往中央越厚、吸收得越多——中央比外圍深約 5.5%，從邊往內約 90 像素平順地變深（不是一層均勻的膜；白字也更清楚一點）
         ccol *= 1.0 - 0.055 * smoothstep(0.0, 0.9 * min(Shape[0].z, Shape[0].w), cu) * a;
         // 亮的背景上壓暗一點（白字才清楚）：上面少、下面多，不是一整片均勻的灰；接近純白（雪地、白牆）再多壓一點，白字才不會幾乎看不見
@@ -355,15 +371,19 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
         // 上方越亮反光越多（暗的桌布上幾乎看不出來），整片都亮的背景減半（白字才清楚）
         float cbot = max(smoothstep(0.15, 0.95, nn.y), 0.45 * smoothstep(0.3, 1.0, nn.x) * smoothstep(0.3, 1.0, cq.y)) * (0.85 + 0.25 * saturate(nn.x + 0.2));
         float3 cabove = BlurBTex.SampleLevel(Lin, (float2(p.x, ctop.y - 10.0 * s) - BlurRect.xy) / BlurRect.zw, 0).rgb;
-        float cband = exp(-cu / (10.0 * s)) * smoothstep(1.5 * s, 4.0 * s, cu);
+        float cband = exp(-cu / (13.0 * s)) * smoothstep(1.5 * s, 6.5 * s, cu);   // 慢慢亮起、慢慢淡掉（很軟，不是一條線）
         float cbk = 0.07 * cbot * cband * (0.35 + 0.65 * smoothstep(0.05, 0.5, Luma(cabove))) * (1.0 - 0.5 * cbright) * a;
         ccol = 1.0 - (1.0 - ccol) * (1.0 - saturate(cabove * 1.4 + 0.05) * cbk);
         // 高光的亮度沿著邊變化（連續地繞過圓角）：約三分之一照「上緣最亮、兩側中等、下緣最淡」，
         // 約三分之二照光從左上來——對角兩道光（Apple 的招牌）：左上最亮、右下是光從玻璃裡面反射出來的那道（約一半多）、
         // 右上和左下暗下來；兩道光比較集中（四次方：受光面明確，往兩側收得快一點，整圈不會平均地亮）
+        // 光源在左上角附近（不是無限遠）：同一條直邊上離它越近越亮——上緣從左往右、左側從上往下慢慢淡下去（直邊上的法線都一樣，
+        // 只看方向的話整條一樣亮）；右下那道反射照鏡像的位置，從右下角往兩邊淡。照卡片裡的位置算，連續地繞過圓角
+        float2 lq0 = (cq - float2(0.1, 0.0)) * float2(1.0, 1.4), lq1 = (cq - float2(0.9, 1.0)) * float2(1.0, 1.4);
+        float near0 = 0.15 + 0.85 * exp(-dot(lq0, lq0) / 0.55), near1 = 0.6 + 0.4 * exp(-dot(lq1, lq1) / 0.55);
         float face = dot(nn, float2(-0.6, -0.8));
         float mw = 0.26 + 0.5 * smoothstep(-0.2, 1.0, -nn.y) + 0.12 * smoothstep(-0.2, 1.0, -nn.x);
-        float lit = 0.68 * (1.05 * pow(saturate(face), 4.0) + 0.62 * pow(saturate(-face), 4.0) + 0.05) + 0.32 * mw;
+        float lit = 0.68 * (1.05 * pow(saturate(face), 4.0) * near0 + 0.62 * pow(saturate(-face), 4.0) * near1 + 0.05) + 0.32 * mw;
         // 高光映著卡片外面的環境（最糊的那張，邊外 14 和 40 像素，取亮的那個：燈的光沿著側邊、圓角延伸一段，不只亮一小點）：
         // 顏色帶外面的色調（暖色的燈旁邊偏暖金、夜景偏冷），亮度跟著外面多亮（燈旁邊亮一點、背光的地方暗一點）——
         // 整圈自然有明暗、冷暖變化，不是一圈一樣亮的白線
@@ -376,7 +396,8 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
         // 先把顏色鮮一點再加（暖色的燈疊在偏冷的玻璃上才不會被中和成灰灰的卡其色；灰色的環境還是灰色）
         float3 cseep = saturate(lerp(oL.xxx, cout, 1.4));
         ccol += a * cseep * 0.09 * smoothstep(0.2, 0.7, oL) * exp(-cu / (26.0 * s)) * (1.0 - 0.7 * cbright);
-        float3 renv = lerp(float3(1.0, 1.0, 1.0), saturate(Hue(cout) * 0.8 + 0.2), 0.3);
+        // 高光的顏色：外面越亮（旁邊有燈）越帶外面的顏色（暖燈旁邊偏金、冷的夜景偏冷）；外面暗的時候偏白（暗處的色相不可靠，帶進來會髒）
+        float3 renv = lerp(float3(1.0, 1.0, 1.0), saturate(Hue(cout) * 0.8 + 0.2), 0.25 + 0.2 * smoothstep(0.08, 0.4, oL));
         // 整片都亮的背景上別讓整圈一起變亮（會像貼紙的描邊）
         float envK = 0.65 + 0.7 * smoothstep(0.04, 0.45, oL) * (1.0 - 0.5 * cbright);
         ccol += C.y * 0.03 * mw * envK * renv * exp(-cu / (1.8 * s)) * a;       // 內側淡淡提亮
@@ -385,17 +406,16 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
         lit = max(lit, 0.85 * smoothstep(0.06, 0.25, oL - cL));
         // 玻璃的厚度（亮的那一半）：往內約 8 像素慢慢淡掉的一層很淡的光，受光的一側多一點——軟的漸層，不是第二條線
         ccol += C.y * 0.022 * lit * envK * renv * exp(-cu / (8.0 * s)) * (1.0 - 0.6 * cbright) * a;
-        // 約 1 像素的細高光（離外緣 0.7 像素、寬 1.1：比 1 像素寬一點，沿著圓角的弧線才不會一格一格的）；
-        // 外圍那圈再一層很淡的菲涅耳（越靠邊反射越多）；都往環境的顏色混，不會爆白
-        float fr = (cu - 0.7 * s) / (1.1 * s);
-        ccol = lerp(ccol, renv, saturate((C.y * 0.4 * lit * exp(-fr * fr) + 0.055 * ct * ct * ct * (0.4 + lit)) * envK * a));
-        // 最外緣很淡的細線（映著外面的環境）：黑底上整圈的輪廓也看得出來；受光的那段亮、背光的那段淡（不是一圈一樣亮的描邊）
-        float ur = cu / s / 1.0;
-        ccol = lerp(ccol, lerp(float3(1.0, 1.0, 1.0), saturate(Hue(cout) * 0.8 + 0.2), 0.25),
-                    saturate(C.y * 0.08 * (0.55 + 0.6 * lit) * (0.8 + 0.6 * (1.0 - smoothstep(0.0, 0.12, oL))) * exp(-ur * ur) * a));
+        // 外圍那圈很淡的菲涅耳（越靠邊反射越多），往環境的顏色混，不會爆白
+        ccol = lerp(ccol, renv, saturate(0.055 * ct * ct * ct * (0.4 + lit) * envK * a));
+        // 約 1 像素的細高光（只有一條：離外緣 0.5 像素、寬 1.1，比 1 像素寬一點，沿著圓角的弧線才不會一格一格的）。
+        // 受光的那段亮、背光的那段只剩很淡的輪廓（黑底上整圈的形狀也看得出來，外面越暗輪廓多一點），不是一圈一樣亮的描邊
+        float fr = (cu - 0.5 * s) / (1.1 * s);
+        float fline = 0.34 * lit * envK + 0.06 * (0.55 + 0.6 * lit) * (0.8 + 0.6 * (1.0 - smoothstep(0.0, 0.12, oL)));
+        ccol = lerp(ccol, renv, saturate(C.y * fline * exp(-fr * fr) * a));
         ccol = lerp(ccol, float3(1.0, 1.0, 1.0), 0.24 * h.energy * a);         // 按下：整塊被白光填滿
-        float2 cgp = p - Touch.xy;
-        ccol += a * Touch.z * 0.13 * exp(-dot(cgp, cgp) / (2.0 * Touch.w * Touch.w + 1.0));
+        float2 cgp = p - Touch.xy, cgq = p - Touch2.xy;
+        ccol += a * 0.13 * max(Touch.z * exp(-dot(cgp, cgp) / (2.0 * Touch.w * Touch.w + 1.0)), Touch2.z * exp(-dot(cgq, cgq) / (2.0 * Touch2.w * Touch2.w + 1.0)));
         // 很淡的固定抖動（±半階，交錯梯度雜訊，不會動、不會閃）：暗的天空、漸層透過玻璃壓暗、加飽和後不會一階一階的
         ccol += (frac(52.9829189 * frac(dot(p, float2(0.06711056, 0.00583715)))) - 0.5) / 255.0;
         return float4(lerp(outside, ccol, saturate(0.5 - h.d / 1.4)), 1.0);   // 外緣的抗鋸齒 1.4 像素寬（圓角的弧線才圓順）
@@ -446,8 +466,8 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
     }
     col = lerp(col, float3(0.42, 0.42, 0.42), exp(h.d / (0.8 * s)) * 0.3 * h.style * a);
     // 按住：從手指下面亮起來，白光往整片玻璃擴散
-    float2 gp = p - Touch.xy;
-    col += a * Touch.z * 0.13 * exp(-dot(gp, gp) / (2.0 * Touch.w * Touch.w + 1.0));
+    float2 gp = p - Touch.xy, gq = p - Touch2.xy;
+    col += a * 0.13 * max(Touch.z * exp(-dot(gp, gp) / (2.0 * Touch.w * Touch.w + 1.0)), Touch2.z * exp(-dot(gq, gq) / (2.0 * Touch2.w * Touch2.w + 1.0)));
     return float4(lerp(outside, col, saturate(0.5 - h.d)), 1.0);
 }
 
@@ -661,7 +681,7 @@ float4 TextGlass(float4 pos : SV_Position) : SV_Target
         IntPtr vs, downPs, blurPs, glassPs, textPs, sampler, glassBuffer, passBuffer, animBuffer;
         public const int ClockAnimFloats = (2 + 30) * 4;   // 跟 cbuffer ClockAnim 一樣的排法
         static readonly float[] noAnim = new float[ClockAnimFloats];
-        readonly float[] glassData = new float[32 * 4];   // 跟 cbuffer GlassInfo 一樣的排法（32 個 float4）
+        readonly float[] glassData = new float[33 * 4];   // 跟 cbuffer GlassInfo 一樣的排法（33 個 float4）
         readonly float[] passData = new float[8];
         readonly IntPtr[] one = new IntPtr[1], two = new IntPtr[2], three = new IntPtr[3], six = new IntPtr[6];
 
@@ -918,6 +938,7 @@ float4 TextGlass(float4 pos : SV_Position) : SV_Target
             Put(g, 29, look.InnerA, look.InnerR, look.Inner, look.Dim);
             Put(g, 30, look.TouchX, look.TouchY, look.TouchGlow, look.TouchRadius);
             Put(g, 31, look.Clear, look.ScatterBusy, look.ScatterRim, 0);
+            Put(g, 32, look.Touch2X, look.Touch2Y, look.Touch2Glow, look.Touch2Radius);
             update(context, glassBuffer, 0, IntPtr.Zero, g, 0, 0);
         }
 

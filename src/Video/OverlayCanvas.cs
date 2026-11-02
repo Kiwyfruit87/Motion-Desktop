@@ -17,7 +17,7 @@ namespace VideoWallpaper
             public abstract void PopClip(int saved);
             public abstract void Image(Overlay o, double offset, double opacity);                   // 整張圖，往右挪 offset
             // 整張圖跟著卡片的玻璃變形：左右兩邊各往外 growX、上緣往上 growY（負的是往內），中間拉長補起來（只有 Direct2D 做得到，GDI 照原樣畫）
-            public virtual void ImageGrown(Overlay o, double growX, double growY, double opacity) { Image(o, 0, opacity); }
+            public virtual void ImageGrown(Overlay o, double growX, double growY, double opacity, double shiftX = 0) { Image(o, 0, opacity); }
             public abstract void Strip(Overlay o, int row, int height, double source, double alpha); // 捲動的歌詞：長圖第 source 列開始的一條
             public virtual void StripBlurred(Overlay o, int row, int height, double source, double alpha) { }   // 同上，糊掉的那張（只有 Direct2D 有）
             // 液態玻璃卡片用（只有 Direct2D 做得到；GDI 不做）：
@@ -81,14 +81,14 @@ namespace VideoWallpaper
 
             // 圖從正中間切成九塊：四個角照原樣挪出去（左邊往左、右邊往右各 growX，上面往上 growY），
             // 中間的十字從正中間那兩列 / 兩欄拉長補起來（邊框的光是一圈，中間那段直的，拉長看不出來）
-            public override void ImageGrown(Overlay o, double growX, double growY, double opacity)
+            public override void ImageGrown(Overlay o, double growX, double growY, double opacity, double shiftX = 0)
             {
-                double mx = Math.Round(o.W / 2.0), my = Math.Round(o.H / 2.0);
+                double mx = Math.Round(o.W / 2.0), my = Math.Round(o.H / 2.0), ox = o.X + shiftX;   // shiftX：整張左右挪（卡片的玻璃往一側鼓出去）
                 // 往內縮（grow 是負的：玻璃變窄、縮回去時稍微縮過頭）：角一樣往內挪，但從靠中間那側切掉縮掉的寬度，
                 // 兩半才不會疊在一起（疊起來那段的光會變兩倍亮）；切掉的是中間直的那段，看不出來
                 double cx = Math.Max(0, Math.Min(mx, -growX)), cy = Math.Max(0, Math.Min(my, -growY));
                 // 每一欄 / 每一列：來源從哪裡、多寬，畫到哪裡、多寬（中間那段沒有往外長就不畫）
-                double[] sx = { 0, mx - 1, mx + cx }, sw = { mx - cx, 2, o.W - mx - cx }, dx = { o.X - growX, o.X + mx - growX, o.X + mx + Math.Max(0, growX) }, dw = { mx - cx, 2 * growX, o.W - mx - cx };
+                double[] sx = { 0, mx - 1, mx + cx }, sw = { mx - cx, 2, o.W - mx - cx }, dx = { ox - growX, ox + mx - growX, ox + mx + Math.Max(0, growX) }, dw = { mx - cx, 2 * growX, o.W - mx - cx };
                 double[] sy = { 0, my - 1, my }, sh = { my - cy, 2, o.H - my }, dy = { o.Y - growY, o.Y + my - growY, o.Y + my }, dh = { my - cy, growY, o.H - my };
                 for (int j = 0; j < 3; j++)
                     for (int i = 0; i < 3; i++)

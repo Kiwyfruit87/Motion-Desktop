@@ -134,15 +134,20 @@ namespace VideoWallpaper
                     + "&duration=" + Math.Round(duration).ToString(CultureInfo.InvariantCulture));
                 var entry = exact == null ? null : Web.Json(exact) as Dictionary<string, object>;
                 var r = FromEntry(entry, duration);
-                if (r != null && r.Synced && !Explicit(entry))
+                if (r != null && r.Synced && (!Explicit(entry) || !Native(entry)))
                 {
                     // 有時間標記、但沒有髒話：同一首歌常有原版和消音的乾淨版（「Fuck it if…」→「What if…」），歌名、長度都一樣，
-                    // 播放器也不會說是哪一版。Spotify、Apple Music 預設播原版，所以再搜一次，有長度相符的原版歌詞就用原版
+                    // 播放器也不會說是哪一版。Spotify、Apple Music 預設播原版，所以再搜一次，有長度相符的原版歌詞就用原版。
+                    // 全是拉丁字母的也再搜一次：韓文、日文歌有人上傳羅馬拼音版（「Majimakcheoreom」＝「마지막처럼」），
+                    // 精確查詢偏偏可能查到它；同一首歌大多數版本是原文的話就用原文（見 NativeWins）
                     try
                     {
                         string found = Download("https://lrclib.net/api/search?track_name=" + Uri.EscapeDataString(title) + "&artist_name=" + Uri.EscapeDataString(artist));
-                        var best = found == null ? null : Pick(Web.Json(found) as object[], duration);
-                        if (best != null && Explicit(best) && Text(best, "syncedLyrics").Length > 0) return FromEntry(best, duration) ?? r;
+                        var list = found == null ? null : Web.Json(found) as object[];
+                        var best = Pick(list, duration);
+                        if (best != null && Text(best, "syncedLyrics").Length > 0
+                            && (Explicit(best) && !Explicit(entry) || !Native(entry) && Native(best) && NativeWins(list, duration)))
+                            return FromEntry(best, duration) ?? r;
                     }
                     catch { }   // 搜尋失敗（伺服器忙）：用精確查到的就好
                     return r;
@@ -177,11 +182,42 @@ namespace VideoWallpaper
             return Swear.IsMatch(text.Length > 0 ? text : Text(e, "plainLyrics"));
         }
 
+        // 歌詞是不是用原本的文字寫的（有至少 10 個拉丁字母以外的字：韓文、日文、中文、俄文…）；全是拉丁字母的是英文歌，或別的語言的羅馬拼音
+        static bool Native(Dictionary<string, object> e)
+        {
+            if (e == null) return false;
+            string text = Text(e, "syncedLyrics");
+            if (text.Length == 0) text = Text(e, "plainLyrics");
+            int n = 0;
+            foreach (char c in text)
+                if (char.IsLetter(c) && c > '\u024F' && (c < '\u1E00' || c > '\u1EFF') && ++n >= 10) return true;
+            return false;
+        }
+
+        // 長度相符的版本裡，原文的比全是拉丁字母的多：這首歌本來就是用那種文字唱的，拉丁字母的是羅馬拼音。
+        // 英文歌偶爾也有人上傳翻譯（中文、韓文），但只會是少數，不會蓋過原本的英文歌詞
+        static bool NativeWins(object[] list, double duration)
+        {
+            if (list == null) return false;
+            int native = 0, latin = 0;
+            foreach (object o in list)
+            {
+                var e = o as Dictionary<string, object>;
+                if (e == null || Text(e, "syncedLyrics").Length == 0 && Text(e, "plainLyrics").Length == 0) continue;
+                double d = Number(e, "duration");
+                if (duration > 0 && d > 0 && Math.Abs(d - duration) > 10) continue;
+                if (Native(e)) native++; else latin++;
+            }
+            return native > latin;
+        }
+
         // 搜尋結果裡挑最適合的：同步歌詞優先，再來是一般歌詞，長度差太多（多半是別的版本）的不要；
-        // 同一種裡原版（有髒話）優先，除非長度比乾淨版多差 4 秒以上（那多半是別的版本）
+        // 同一種裡原版（有髒話）優先，除非長度比乾淨版多差 4 秒以上（那多半是別的版本）；
+        // 大多數版本是原文的話，羅馬拼音的也往後排（除非原文的長度多差 6 秒以上）
         static Dictionary<string, object> Pick(object[] list, double duration)
         {
             if (list == null) return null;
+            bool nativeWins = NativeWins(list, duration);
             Dictionary<string, object> best = null;
             double bestScore = double.MaxValue;
             foreach (object o in list)
@@ -193,7 +229,7 @@ namespace VideoWallpaper
                 double d = Number(e, "duration");
                 double diff = duration > 0 && d > 0 ? Math.Abs(d - duration) : 0;
                 if (diff > 10) continue;
-                double score = diff + (synced ? 0 : plain ? 100 : 200) + (Explicit(e) ? 0 : 4);
+                double score = diff + (synced ? 0 : plain ? 100 : 200) + (Explicit(e) ? 0 : 4) + (nativeWins && !instrumental && !Native(e) ? 6 : 0);
                 if (score < bestScore) { bestScore = score; best = e; }
             }
             return best;

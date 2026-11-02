@@ -249,7 +249,8 @@ namespace VideoWallpaper
         }
 
         // 畫面上第 y 列在玻璃裡多少（玻璃上緣 top 以上 0；往下 fade 的距離內平順地變到 1）
-        static double InGlass(double y, double top, double fade) { return Ease((y - top - 4) / fade); }
+        // 歌詞離玻璃上緣多近：上緣往下 0.57 × fade（1080p 8 像素）以內完全看不到，再往下 fade 慢慢出現（字跟玻璃的邊至少留 8）
+        static double InGlass(double y, double top, double fade) { return Ease((y - top - 0.57 * fade) / fade); }
 
         // 0～1 之間平順地進出（超出範圍夾住）
         static double Ease(double x) { x = Math.Max(0, Math.Min(1, x)); return x * x * (3 - 2 * x); }
@@ -382,10 +383,12 @@ namespace VideoWallpaper
                 Follow(t, canvas, o.Follow, ref follow);
                 if (o.Pulse) fade *= 0.7 * glow;   // 邊框的光暈：只在重拍時亮，最亮 70%（像呼吸，不是閃）
                 if (fade <= 0.004) continue;
-                if (o.Pulse && t.Liquid != null && (Math.Abs(t.Liquid.Extended) > 0.5 || Math.Abs(t.Liquid.Wobbled) > 0.0005))
+                if (o.Pulse && t.Liquid != null && (Math.Abs(t.Liquid.Extended) > 0.5 || Math.Abs(t.Liquid.Wobbled) > 0.0005 || Math.Abs(t.Liquid.Bulged) > 0.05))
                 {
-                    // 歌詞顯示時卡片的玻璃往上延伸、左右彈：光暈跟著玻璃的形狀（上緣往上挪 Extended、左右各挪寬度的一半 × Wobbled）
-                    canvas.ImageGrown(o, t.Liquid.Spec.W / 2 * t.Liquid.Wobbled, t.Liquid.Extended, Math.Min(1, fade));
+                    // 歌詞顯示時卡片的玻璃往上延伸、左右彈：光暈跟著玻璃的形狀（上緣往上挪 Extended、左右各挪寬度的一半 × Wobbled；
+                    // 往一側鼓出去時整張挪 Bulged 的一半、兩邊各再寬一半）
+                    double bulge = t.Liquid.Bulged;
+                    canvas.ImageGrown(o, t.Liquid.Spec.W / 2 * t.Liquid.Wobbled + Math.Abs(bulge) / 2, t.Liquid.Extended, Math.Min(1, fade), bulge / 2);
                     continue;
                 }
                 if (o.ViewH == 0)

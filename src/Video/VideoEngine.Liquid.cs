@@ -126,10 +126,21 @@ namespace VideoWallpaper
             public readonly Spring On = new Spring(), LyricsDim = new Spring();
             // 歌詞顯示時玻璃往上延伸多少（像素，Extend 是目標；Extended 是彈簧現在長到哪）
             public double Extend, Extended;   // （Extended 縮回時可以短暫是負的：回彈）
+            public double ExtendGoal;          // 彈簧追的目標：往上長時直接是 Extend；縮回時約 0.06 秒滑下去（力道慢慢加上去，頂點是圓的、不會像撞到天花板）
             public readonly Spring Grow = new Spring();
             // 左右跟著彈（像果凍）：寬度多（正）或少（負）幾成，被長高的速度推一下以後自己晃一兩下才停
             public double Wobbled;
             public readonly Spring Wobble = new Spring();
+            // 按住歌詞圓鈕蓄力（按著時卡片上緣往下壓一點）、放開時照按了多久彈上去：
+            // 力道 0～1（輕點是 0，跟原本一樣；越用力長得越快、衝過頭越多、回彈一兩下）；方向 −1～1（按在圓鈕的左邊、右邊）
+            public bool Charging;
+            public long ChargeStart;
+            public bool LaunchPending;
+            public long LaunchAt;
+            public double LaunchPower, LaunchDir;
+            // 往一側鼓出去（像果凍被從旁邊推了一下）：右緣往外多少像素（負的是左緣往外），彈一兩下回到 0
+            public double Bulged;
+            public readonly Spring Bulge = new Spring();
             // 歌詞圓鈕按下的樣子：按著沒、什麼時候按的、按下的程度
             public bool Held;
             public long PressedAt;
@@ -137,6 +148,7 @@ namespace VideoWallpaper
             public double Pressed;
             // 按住卡片：從手指下面亮起來、白光往整張卡片擴散（放開才慢慢退），跟原型一樣
             public double TouchX, TouchY, TouchGlow, TouchAge;
+            public double OldX, OldY, OldGlow, OldRadius;   // 上一次按的白光（很快又按一下時還沒退完）：留著照常慢慢退
             public bool Touching;
             public long LastTick;
             // 這一格算出來的樣子（畫的時候用）
@@ -215,7 +227,14 @@ namespace VideoWallpaper
                 if (t.Liquid == null) return;
                 var c = t.Liquid;
                 // 閒置後的第一格不要一次跳太多：很久沒畫才從現在開始算（還在動的話照常往下算，玻璃不會停一格）
-                if (down && !c.Touching) { c.TouchAge = 0; if (now - c.LastTick > 100) c.LastTick = now; }
+                // 按下時白光從手指下面重新擴散。上一次的白光還沒退完（很快又按一下）：舊的留著照常慢慢退（另一層），
+                // 新的從手指重新亮、重新擴散，畫的時候兩個取亮的（整片不會一下子暗掉、閃一下，也不會疊得比按一下更亮）
+                if (down && !c.Touching)
+                {
+                    if (c.TouchGlow >= 0.002 && c.TouchGlow >= c.OldGlow) { c.OldX = c.TouchX; c.OldY = c.TouchY; c.OldGlow = c.TouchGlow; c.OldRadius = TouchRadius(c); }
+                    c.TouchGlow = 0; c.TouchAge = 0;
+                    if (now - c.LastTick > 100) c.LastTick = now;
+                }
                 if (down) { c.TouchX = x; c.TouchY = y; }
                 c.Touching = down;
             });
@@ -230,6 +249,33 @@ namespace VideoWallpaper
                 var c = t.Liquid;
                 if (down && !c.Held) { c.PressedAt = now; if (now - c.LastTick > 100) c.LastTick = now; }
                 c.Held = down;
+            });
+        }
+
+        // 按住歌詞圓鈕準備打開歌詞（蓄力，卡片上緣往下壓一點）/ 取消
+        public void ChargeLiquid(IntPtr hwnd, bool on)
+        {
+            WithTarget(hwnd, delegate(Target t, long now)
+            {
+                if (t.Liquid == null) return;
+                var c = t.Liquid;
+                if (on && !c.Charging) { c.ChargeStart = now; if (now - c.LastTick > 100) c.LastTick = now; }
+                c.Charging = on;
+                if (!on) { c.LaunchPending = false; c.LaunchPower = 0; }   // 取消（放開前歌詞不見了）：不彈
+            });
+        }
+
+        // 放開歌詞圓鈕、歌詞要往上展開了：power 0～1 是蓄了多少力（照按住的時間），dir −1～1 是按在圓鈕的哪一邊。
+        // 要在 SetLiquidExtend 之前送（玻璃開始長的那一格就照這個力道彈）
+        public void LaunchLiquid(IntPtr hwnd, double power, double dir)
+        {
+            WithTarget(hwnd, delegate(Target t, long now)
+            {
+                if (t.Liquid == null) return;
+                var c = t.Liquid;
+                c.LaunchPending = true; c.LaunchAt = now;   // 還是按著的樣子（壓著）：玻璃開始長的那一格才放開，中間不會先彈回原位一格
+                c.LaunchPower = Math.Max(0, Math.Min(1, power)); c.LaunchDir = Math.Max(-1, Math.Min(1, dir));
+                if (now - c.LastTick > 100) c.LastTick = now;
             });
         }
 
@@ -440,17 +486,67 @@ namespace VideoWallpaper
             c.TouchAge += dt;
             c.TouchGlow += ((c.Touching ? 1 : 0) - c.TouchGlow) * Math.Min(1, dt * (c.Touching ? 8 : 2.5));
             if (!c.Touching && c.TouchGlow < 0.002) c.TouchGlow = 0;
-            bool glowMoving = c.Touching ? c.TouchGlow < 0.998 || c.TouchAge < 1.2 : c.TouchGlow > 0;
+            c.OldGlow -= c.OldGlow * Math.Min(1, dt * 2.5);   // 舊的白光跟放開時一樣慢慢退
+            if (c.OldGlow < 0.002) c.OldGlow = 0;
+            bool glowMoving = (c.Touching ? c.TouchGlow < 0.998 || c.TouchAge < 1.2 : c.TouchGlow > 0) || c.OldGlow > 0;
             c.OnAmount = Math.Max(0, Math.Min(1, c.On.Step(c.LyricsOn ? 1 : 0, 0.3, 1, dt)));
             c.LyricsAlpha = c.LyricsDim.Step(Math.Min(1, c.LyricsLevel / 0.6), 0.3, 1, dt);
-            // 長上去、縮回來：幾乎不過衝（1080p 約 1 像素），乾淨地停在定位；縮回時最多比原本的卡片矮 16（碰不到上面的封面）
-            c.Extended = Math.Max(-16 * c.Spec.Scale, c.Grow.Step(c.Extend, 0.45, 0.85, dt));
-            // 往上長得快時變窄、縮回得快時變寬（照長高的速度推）：一次順順地變窄再回來，不再晃。
-            // 用 tanh 柔和地飽和（最多約 ±3.5%）：硬夾的話會頂到上限「黏住」一下；左右內距 16，變窄時還留約 9
-            double push = 0.035 * Math.Tanh(-0.008 * c.Grow.V / Math.Max(1, c.Spec.H) / 0.035);
-            c.Wobbled = c.Wobble.Step(push, 0.3, 0.8, dt);
+            // 蓄力：按住歌詞圓鈕時卡片上緣往下壓（約 0.6 秒壓到最多 10 像素，先快後慢），像把彈簧壓緊
+            double s = c.Spec.Scale;
+            double charge = c.Charging ? 1 - Math.Pow(1 - Math.Min(1, (now - c.ChargeStart) / 600.0), 2) : 0;
+            // 放開：玻璃開始往上長的那一格照蓄的力彈出去——力道越大彈簧越軟、越慢（response 0.45 → 0.62 秒）、阻尼越小，
+            // 長上去的速度跟輕點差不多，但衝過頭多、回彈慢慢地晃一兩下；按在圓鈕的一邊，卡片的另一邊往外鼓一下再彈回來
+            // （照偏離中心的平方：按在中間附近幾乎不鼓）。輕點（力道 0）跟原本一樣乾淨地長上去
+            if (c.LaunchPending && c.Extend > 0)
+            {
+                c.LaunchPending = false; c.Charging = false;
+                c.Bulge.Step(0, 0.4, 0.45, 0);
+                c.Bulge.V -= c.LaunchDir * Math.Abs(c.LaunchDir) * c.LaunchPower * 320 * s;   // 蓄滿、按在圓鈕最邊緣：另一邊鼓出約 12 像素
+            }
+            else if (c.LaunchPending && now - c.LaunchAt > 1000) { c.LaunchPending = false; c.Charging = false; c.LaunchPower = 0; }   // 玻璃一直沒長（歌詞的圖還沒畫好）：不等了
+            // 彈簧的軟硬一路連續地變回原本的（不在某個時間點突然換，同一個動作早一點、晚一點收回才不會像兩種材質）：
+            // 長上去之後 0.8 秒內維持蓄的力，之後約 0.6 秒的時間常數慢慢變硬；中途收回的話，約 1.2 秒內慢慢變回原本的彈簧——
+            // 收回時還是同一顆軟彈簧接著動（不會在半空中急停），還帶著彈性落地：上緣往下壓一點、左右鼓出來（見下面的寬度），再一起彈回。
+            // 力道還沒退完就算卡片停了也要繼續畫（見最後的 return），不然停在一半，很久以後收回還帶著軟彈簧
+            if (!c.LaunchPending && c.LaunchPower > 0)
+            {
+                if (c.Extend <= 0) c.LaunchPower -= dt / 1.2;
+                else if (now - c.LaunchAt > 800) c.LaunchPower *= Math.Exp(-dt / 0.6);
+                if (c.LaunchPower < 0.01) c.LaunchPower = 0;
+            }
+            double power = c.LaunchPending ? 0 : c.LaunchPower;
+            // 長上去、縮回來：輕點幾乎不過衝（1080p 約 1 像素），乾淨地停在定位；蓄滿的衝過頭約 38 像素再慢慢彈回。
+            // 往下（蓄力壓下、縮回時回彈）最多比原本的卡片矮約 8：上方的內距 16，封面、歌名跟玻璃上緣至少還留 8。
+            // 越往下越難壓（g / (g + 8)，一路慢慢變硬），不是撞到一條線硬停
+            c.ExtendGoal = c.Extend >= c.ExtendGoal ? c.Extend : c.Extend + (c.ExtendGoal - c.Extend) * Math.Exp(-dt / 0.06);
+            if (Math.Abs(c.ExtendGoal - c.Extend) < 0.05) c.ExtendGoal = c.Extend;
+            double growTarget = c.ExtendGoal - 10 * s * (c.LaunchPending ? 1 - Math.Pow(1 - Math.Min(1, (c.LaunchAt - c.ChargeStart) / 600.0), 2) : charge);
+            // 縮回（歌詞收起來、沒有按著蓄力）用跟彈上去同一顆彈簧（一樣的快慢），只是阻尼大一點（蓄滿時 0.65，彈上去是 0.48）：
+            // 一樣快快地落下、接近底時順順地慢下來，圓滑地衝過頭約 5 像素再回來（像彈上去的頂點倒過來）。
+            // 不能照彈上去的阻尼：會往下衝過頭約 20 像素，上緣最多只能壓 8（封面、歌名要留距離），只好硬壓扁，看起來像卡住
+            bool down = c.Extend <= 0 && !c.Charging;
+            double grown = c.Grow.Step(growTarget, 0.45 + 0.17 * power, down ? 0.85 - 0.2 * power : 0.85 - 0.37 * power, dt), sink = 8 * s, g = Math.Max(0, -grown);
+            // 往下多少（g）照 tanh 收斂：一開始跟著彈簧走，越深越難壓，不會超過 8；蓄力壓下照原本的 g / (g + 8)（壓得比較淺）
+            c.Extended = grown >= 0 ? grown : down ? -sink * Math.Tanh(g / sink) : -sink * g / (g + sink);
+            c.Bulged = c.Bulge.Step(0, 0.4, 0.45, dt);
+            // 寬度跟高度是同一塊果凍（一顆彈簧追一個目標，目標由長高的彈簧算出來）：
+            //   往上長得快時被拉長變窄（照長高的速度推，tanh 柔和地飽和，最多約 3.5%；蓄力彈出時推力最多 2.2 倍、上限 4%）；
+            //   落下途中不變寬（還在空中、沒被壓；蓄力後縮回反而被拉細，見下面），只有真的往下壓扁（蓄力、縮回時衝過頭）時左右撐開：
+            //   彈簧原本要往下多少（g），寬度就多 g / 卡片高 × 0.8 的比例（蓄力後縮回見下面）；
+            //   按住蓄力（靜靜地壓著）時 0.5（上緣壓下約 4，兩邊各撐約 5）。
+            // 兩個一起推同一顆彈簧，所以蓄力壓扁→放開往上拉長變細→落地壓扁變寬是同一個連續的動作，不會各晃各的；
+            // 收窄最多 4%（每邊 8：左右內距 16，兩邊的字、圓鈕跟玻璃至少還留 8）
+            double wob = 0.035 * (1 + 0.143 * power);
+            // 縮回也跟彈上去一樣：落得快時被拉長變細，到底衝過頭時壓扁、左右鼓出來（比平常多：2 倍，約 11 像素）。
+            // 照力道慢慢加上去（力道 0.2 以上才全部）：輕點收回跟原本一樣
+            double h = Math.Max(1, c.Spec.H), hard = down ? Math.Min(1, power / 0.2) : 0;
+            double speed = c.Grow.V > 0 ? c.Grow.V : -c.Grow.V * hard;
+            double push = wob * Math.Tanh(-0.008 * (1 + 1.2 * power) * speed / h / wob)
+                + (c.Charging ? 0.5 : 0.8 + 1.2 * hard) * g / h;
+            double wobbled = c.Wobble.Step(push, 0.2, 0.85, dt);   // 跟得比較緊（0.2 秒）：壓扁時馬上鼓、變細時馬上收
+            c.Wobbled = wobbled >= 0 ? wobbled : -0.04 * Math.Tanh(-wobbled / 0.04);
 
-            return moving || c.Grow.Moving(c.Extend, 0.3) || c.Wobble.Moving(push, 0.0005) || c.Scrub.Moving(c.Scrubbing ? 1 : 0, 0.002) || c.Sweeping || pressMoving || glowMoving
+            return moving || c.ExtendGoal != c.Extend || c.Grow.Moving(growTarget, 0.3) || c.Wobble.Moving(push, 0.0005) || c.Bulge.Moving(0, 0.05) || c.Charging && charge < 1 || c.LaunchPower > 0 || c.Scrub.Moving(c.Scrubbing ? 1 : 0, 0.002) || c.Sweeping || pressMoving || glowMoving
                 || c.On.Moving(c.LyricsOn ? 1 : 0, 0.002) || c.LyricsDim.Moving(Math.Min(1, c.LyricsLevel / 0.6), 0.002);
         }
 
@@ -472,12 +568,12 @@ namespace VideoWallpaper
             var spec = t.Liquid.Spec;
             double s = spec.Scale, sx, sy, dx, dy;
             CardTransform(t, out sx, out sy, out dx, out dy);
-            // 歌詞顯示時往上延伸 ext（下緣不動；折射帶的寬度照原本的卡片算，不跟著變）；左右跟著彈（見 Wobble）
-            double ext = t.Liquid.Extended, wobble = t.Liquid.Wobbled;
-            double cx = (spec.X + spec.W / 2) * sx + dx, cy = (spec.Y + spec.H / 2 - ext / 2) * sy + dy;
+            // 歌詞顯示時往上延伸 ext（下緣不動；折射帶的寬度照原本的卡片算，不跟著變）；左右跟著彈（見 Wobble）、往一側鼓出去（見 Bulge）
+            double ext = t.Liquid.Extended, wobble = t.Liquid.Wobbled, bulge = t.Liquid.Bulged;
+            double cx = (spec.X + spec.W / 2 + bulge / 2) * sx + dx, cy = (spec.Y + spec.H / 2 - ext / 2) * sy + dy;
             var card = new LiquidGlass.Shape
             {
-                X = (float)cx, Y = (float)cy, HalfW = (float)(spec.W / 2 * (1 + wobble)), HalfH = (float)((spec.H + ext) / 2), Radius = (float)spec.Radius,
+                X = (float)cx, Y = (float)cy, HalfW = (float)(spec.W / 2 * (1 + wobble) + Math.Abs(bulge) / 2), HalfH = (float)((spec.H + ext) / 2), Radius = (float)spec.Radius,
                 Appear = 1, Thick = (float)Math.Max(0.6, Math.Min(1.5, Math.Min(spec.W, spec.H) / 2 / (cardLook.Bevel * s))),
                 Mag = 1, Shadow = 0.11f, D00 = (float)(1 / sx), D11 = (float)(1 / sy),   // 不染色、不放大；很淡、很柔的影子（浮在桌布上，不是黑框）
                 Focus = 0.45f,   // 上下兩條直邊的折射只剩 55%（背景的字不會被拉長）；左右邊、圓角全強度
@@ -487,7 +583,7 @@ namespace VideoWallpaper
             int margin = (int)Math.Ceiling(96 * s), slack = (int)Math.Ceiling(90 * s);   // 上下多留 90：卡片慣性晃動最多約 85
             int bx, by, bw, bh, ex, ey, ew, eh;
             Clip(t, spec.X - margin, spec.Y - ext - margin - slack, spec.W + 2 * margin, spec.H + ext + 2 * (margin + slack), out bx, out by, out bw, out bh);
-            double hw = spec.W / 2 * (1 + wobble) * sx, hh = (spec.H + ext) / 2 * sy, pad = 52 * s;
+            double hw = (spec.W / 2 * (1 + wobble) + Math.Abs(bulge) / 2) * sx, hh = (spec.H + ext) / 2 * sy, pad = 52 * s;
             Clip(t, cx - hw - pad, cy - hh - pad, 2 * (hw + pad), 2 * (hh + pad), out ex, out ey, out ew, out eh);
             if (bw <= 0 || bh <= 0 || ew <= 0 || eh <= 0) return moving;
             // 影片沒換格、範圍也沒變：沿用上次的模糊（後面本來就糊掉了，一秒更新 30 次看起來跟 60 次一樣）
@@ -506,12 +602,14 @@ namespace VideoWallpaper
         // 按住卡片的白光（兩層玻璃都有）；沒按的時候清掉（質感是重複用的，不能留著上一次的）
         static LiquidGlass.Look WithTouch(LiquidCard c, LiquidGlass.Look look)
         {
-            if (c.TouchGlow <= 0) { look.TouchGlow = 0; return look; }
-            double s = c.Spec.Scale;
-            look.TouchX = (float)c.TouchX; look.TouchY = (float)c.TouchY; look.TouchGlow = (float)c.TouchGlow;
-            look.TouchRadius = (float)((30 + 380 * Math.Min(c.TouchAge, 1.2)) * s);
+            look.TouchGlow = (float)Math.Max(0, c.TouchGlow); look.Touch2Glow = (float)c.OldGlow;
+            if (c.TouchGlow > 0) { look.TouchX = (float)c.TouchX; look.TouchY = (float)c.TouchY; look.TouchRadius = (float)TouchRadius(c); }
+            if (c.OldGlow > 0) { look.Touch2X = (float)c.OldX; look.Touch2Y = (float)c.OldY; look.Touch2Radius = (float)c.OldRadius; }
             return look;
         }
+
+        // 白光現在擴散到多大（從手指下面 30 像素開始，約 1.2 秒擴到 410）
+        static double TouchRadius(LiquidCard c) { return (30 + 380 * Math.Min(c.TouchAge, 1.2)) * c.Spec.Scale; }
 
         // 把 (x, y, w, h) 夾在畫面裡、換成整數
         static void Clip(Target t, double x, double y, double w, double h, out int cx, out int cy, out int cw, out int ch)
