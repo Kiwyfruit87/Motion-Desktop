@@ -76,9 +76,11 @@ namespace VideoWallpaper
             for (int row = 0; row < viewHeight; row++)
             {
                 double lines = Math.Abs(row + 1 - viewHeight / 2.0) / spacing;          // 離中間幾行
-                // 靠近邊緣再淡出：上緣長一點、平順地淡出（像消失在玻璃裡）；下緣短短一段，才接得上卡片的內容
-                double top = Math.Min(1, row / (spacing * 0.8)), bottom = Math.Min(1, (viewHeight - 1 - row) / (spacing * 0.45));
-                double edge = Math.Min(top * top * (3 - 2 * top), bottom);
+                // 靠近邊緣再淡出，兩邊都是平順的曲線、都超過一行：換行往上捲的那一下（剛好捲一行），
+                // 最上面那行是一路慢慢消失在玻璃上緣、最下面那行從封面上方一路慢慢浮現，不會在某個位置突然變淡、突然冒出來。
+                // 上緣長一點（像消失在玻璃裡）；下緣短一點，才接得上卡片的內容
+                double top = Math.Min(1, row / (spacing * 1.2)), bottom = Math.Min(1, (viewHeight - 1 - row) / (spacing * 1.0));
+                double edge = Math.Min(top * top * (3 - 2 * top), bottom * bottom * (3 - 2 * bottom));
                 double level = highlight ? 1 : 0.75 * Math.Max(0, Math.Min(1, (3 - lines) / 1.5));
                 mask[row] = (float)(level * edge * LyricsOpacity);
             }
@@ -97,6 +99,36 @@ namespace VideoWallpaper
         {
             return PerLine(sheetHeight, centers, heights, spacing, line, BlurLevels, BlurLevels);
         }
+
+        // 長圖每一列屬於哪一行、那行的中心（長圖的列）：行的範圍內就是那行；行跟行之間的空白從正中間分給上下兩行
+        public static float[] LyricsAnchors(int sheetHeight, double[] centers, double[] heights)
+        {
+            var anchors = new float[sheetHeight];
+            int n = centers.Length, j = 0;
+            for (int row = 0; row < sheetHeight; row++)
+            {
+                double y = row + 0.5;
+                while (j + 1 < n && y > (centers[j] + heights[j] / 2 + centers[j + 1] - heights[j + 1] / 2) / 2) j++;
+                anchors[row] = (float)(n == 0 ? y : centers[j]);
+            }
+            return anchors;
+        }
+
+        // 唱到第 line 行時長圖每一列的大小（Apple Music：唱到的那行正常大小，其他行小一點；換行時跟亮度一起慢慢變過去）
+        public static float[] LyricsZoom(int sheetHeight, double[] centers, double[] heights, int line)
+        {
+            var zoom = new float[sheetHeight];
+            int n = centers.Length, j = 0;
+            for (int row = 0; row < sheetHeight; row++)
+            {
+                double y = row + 0.5;
+                while (j + 1 < n && y > (centers[j] + heights[j] / 2 + centers[j + 1] - heights[j + 1] / 2) / 2) j++;
+                zoom[row] = (float)(j == line ? 1 : OtherLineZoom);
+            }
+            return zoom;
+        }
+
+        const double OtherLineZoom = 0.94;
 
         // 離目前這行 0、1、2、3、4 行的亮度（再遠就看不到）和糊的程度：目前這行跟其他行主次分明（Apple Music 其他行大約 35 ～ 45%）；
         // 還沒唱到的行（下面）比唱過的（上面）亮一點（Apple Music 的樣子；下面一直有字，才跟卡片的內容接成一塊）。

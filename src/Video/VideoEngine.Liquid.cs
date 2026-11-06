@@ -126,6 +126,7 @@ namespace VideoWallpaper
             public readonly Spring On = new Spring(), LyricsDim = new Spring();
             // 歌詞顯示時玻璃往上延伸多少（像素，Extend 是目標；Extended 是彈簧現在長到哪）
             public double Extend, Extended;   // （Extended 縮回時可以短暫是負的：回彈）
+            public double ExtendFull;          // 上一次往上長的目標（縮回去時歌詞照它算還差多少，跟著玻璃沉下去）
             public double ExtendGoal;          // 彈簧追的目標：往上長時直接是 Extend；縮回時約 0.06 秒滑下去（力道慢慢加上去，頂點是圓的、不會像撞到天花板）
             public readonly Spring Grow = new Spring();
             // 左右跟著彈（像果凍）：寬度多（正）或少（負）幾成，被長高的速度推一下以後自己晃一兩下才停
@@ -205,7 +206,9 @@ namespace VideoWallpaper
         {
             WithTarget(hwnd, delegate(Target t, long now)
             {
-                if (t.Liquid != null) t.Liquid.Extend = up;
+                if (t.Liquid == null) return;
+                t.Liquid.Extend = up;
+                if (up > 0) t.Liquid.ExtendFull = up;
             });
         }
 
@@ -515,7 +518,8 @@ namespace VideoWallpaper
                 if (c.LaunchPower < 0.01) c.LaunchPower = 0;
             }
             double power = c.LaunchPending ? 0 : c.LaunchPower;
-            // 長上去、縮回來：輕點幾乎不過衝（1080p 約 1 像素），乾淨地停在定位；蓄滿的衝過頭約 38 像素再慢慢彈回。
+            // 長上去：輕點（沒蓄力）稍微衝過頭約 3%（1080p 約 6 像素）再輕輕回來，點綴一下就好；蓄滿的衝過頭約 38 像素再慢慢彈回。
+            // 縮回來幾乎不過衝，乾淨地停在定位。
             // 往下（蓄力壓下、縮回時回彈）最多比原本的卡片矮約 8：上方的內距 16，封面、歌名跟玻璃上緣至少還留 8。
             // 越往下越難壓（g / (g + 8)，一路慢慢變硬），不是撞到一條線硬停
             c.ExtendGoal = c.Extend >= c.ExtendGoal ? c.Extend : c.Extend + (c.ExtendGoal - c.Extend) * Math.Exp(-dt / 0.06);
@@ -525,7 +529,7 @@ namespace VideoWallpaper
             // 一樣快快地落下、接近底時順順地慢下來，圓滑地衝過頭約 5 像素再回來（像彈上去的頂點倒過來）。
             // 不能照彈上去的阻尼：會往下衝過頭約 20 像素，上緣最多只能壓 8（封面、歌名要留距離），只好硬壓扁，看起來像卡住
             bool down = c.Extend <= 0 && !c.Charging;
-            double grown = c.Grow.Step(growTarget, 0.45 + 0.17 * power, down ? 0.85 - 0.2 * power : 0.85 - 0.37 * power, dt), sink = 8 * s, g = Math.Max(0, -grown);
+            double grown = c.Grow.Step(growTarget, 0.45 + 0.17 * power, down ? 0.85 - 0.2 * power : 0.75 - 0.27 * power, dt), sink = 8 * s, g = Math.Max(0, -grown);
             // 往下多少（g）照 tanh 收斂：一開始跟著彈簧走，越深越難壓，不會超過 8；蓄力壓下照原本的 g / (g + 8)（壓得比較淺）
             c.Extended = grown >= 0 ? grown : down ? -sink * Math.Tanh(g / sink) : -sink * g / (g + sink);
             c.Bulged = c.Bulge.Step(0, 0.4, 0.45, dt);

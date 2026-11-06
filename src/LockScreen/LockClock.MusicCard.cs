@@ -19,7 +19,9 @@ namespace VideoWallpaper
             public int[] Chrome;      // 沒有液態玻璃時（舊顯示卡）退回的毛玻璃樣子：霧白、上緣反光、顆粒、邊框
             public int[] Info;        // 歌名、「歌手 — 專輯」（換歌時跟封面一起滑動、淡入淡出）
             public int[] Cover;       // 專輯封面（帶淡淡的影子；沒有封面時是半透明方塊和音符）
-            public int[] Buttons;     // 隨機播放 / 上一首 / 播放暫停 / 下一首 / 循環（換歌時不動）
+            public int[] Buttons;     // 隨機播放 / 上一首 / 下一首 / 循環（換歌時不動）
+            public int[] PlayKey, PauseKey;   // 播放鍵的 ▶、⏸ 各一張（兩張都在，換的時候一張縮小淡出、另一張從小放大彈出來）
+            public MarqueeLine Title, Subtitle;   // 太長、要跑馬燈的歌名 / 副標（放得下就是 null，畫在 Info 裡）
             public int[] Mic, MicOn;  // 歌詞圓鈕上的圖示：白色（沒開）、深色（開著時底是白的）
             public CardColor Color;   // 重拍時邊框泛出的光暈（跟著封面的顏色）
             public string ColorKey;   // 顏色有沒有變（換歌時顏色變了才淡入淡出）
@@ -29,6 +31,15 @@ namespace VideoWallpaper
             public double ProgressLeft, ProgressWidth;     // 進度條（拖曳時換算成秒數）
             public bool CanPrev = true, CanNext = true;    // 播放器能不能跳上一首 / 下一首（不能的話鍵很淡）
             public VideoEngine.LiquidCardSpec Spec;        // 給播放引擎畫液態玻璃和卡片上的東西
+            public double ArtX, ArtY, KeyX, KeyY;          // 封面、播放鍵的中心（螢幕座標；縮放動畫的中心）
+        }
+
+        // 跑馬燈的一行字：整行不截斷畫成一張圖（四周留給柔光的空間），只在 (ViewX, 寬 ViewW) 看得到
+        public class MarqueeLine
+        {
+            public int[] Pixels;
+            public int W, H, X, Y;
+            public double TextW, ViewX, ViewW;
         }
 
         // 卡片上的位置（1080p 的像素，以卡片左上角為 0）
@@ -36,7 +47,8 @@ namespace VideoWallpaper
         //   上面：封面、歌名和歌手，右上角歌詞圓鈕；中間：時間 — 進度條 — 剩下的時間（同一列）；
         //   最下面：隨機播放在最左、⏪ ⏸ ⏩ 放大置中（間隔約卡寬的 18%）、循環在最右。
         // 封面圓角跟卡片同心：卡片 34 = 封面 18 + 邊距 16
-        const double CardW = 400, CardH = 198, CardPad = 16, ArtSize = 72, ColumnX = 100, ColumnW = 248;
+        // 文字欄：左邊離封面 12（16 + 72 + 12 = 100）、右邊離歌詞圓鈕也是 12（370 − 14 − 12 = 344），跑馬燈捲到兩端都留一樣的距離
+        const double CardW = 400, CardH = 198, CardPad = 16, ArtSize = 72, ColumnX = 100, ColumnW = 244;
         const double TitleY = 45, SubtitleY = 66, LyricsX = 370, LyricsY = 52, LyricsR = 14;
         const double ProgressY = 114, ProgressGap = 14;   // 兩端的時間在進度條左右，跟進度條的間隔兩邊一樣（見 ProgressEnds）
         const double ControlsY = 162, ShuffleX = 40, PrevX = 128, PlayX = 200, NextX = 272, RepeatX = 360;
@@ -59,9 +71,18 @@ namespace VideoWallpaper
             var art = DecodeArt(track.Art, (int)Math.Round(300 * s));
             card.Chrome = Layer(card, dc => DrawChrome(dc, card));
             card.CanPrev = track.CanPrev; card.CanNext = track.CanNext;
-            card.Info = Layer(card, dc => DrawInfo(dc, card, track), true);
-            card.Buttons = RenderButtons(card, playing, shuffle, repeat);
+            // 太長的歌名、副標拿出來做跑馬燈，Info 裡就不畫
+            string subtitle = Subtitle(track);
+            double titleY = string.IsNullOrEmpty(subtitle) ? CardPad + ArtSize / 2 + 6 : TitleY;
+            card.Title = RenderMarquee(card, track.Title, 16, FontWeights.SemiBold, Brushes.White, titleY);
+            card.Subtitle = RenderMarquee(card, subtitle, 13, FontWeights.Normal, SubtitleBrush, SubtitleY);
+            card.Info = Layer(card, dc => DrawInfo(dc, card, track.Title, subtitle, titleY), true);
+            card.Buttons = RenderButtons(card, shuffle, repeat);
+            card.PlayKey = Layer(card, dc => DrawPlayKey(dc, s, false), true);
+            card.PauseKey = Layer(card, dc => DrawPlayKey(dc, s, true), true);
             card.Cover = RenderCover(card, art);
+            card.ArtX = card.InnerX + CardPad * s + Math.Round(ArtSize * s) / 2; card.ArtY = card.InnerY + CardPad * s + Math.Round(ArtSize * s) / 2;
+            card.KeyX = card.InnerX + Math.Round(PlayX * s); card.KeyY = card.InnerY + ControlsY * s;
             card.Mic = Layer(card, dc => DrawLyricsIcon(dc, s, Brushes.White), true);
             card.MicOn = Layer(card, dc => DrawLyricsIcon(dc, s, new SolidColorBrush(Color.FromRgb(40, 40, 46))));
 
@@ -151,26 +172,53 @@ namespace VideoWallpaper
             return Snapshot(root, card.Width, card.Height);
         }
 
-        // 歌名、「歌手 — 專輯」
-        static void DrawInfo(DrawingContext dc, MusicCard card, NowPlaying.Track track)
+        static readonly Brush SubtitleBrush = new SolidColorBrush(Color.FromArgb(0xB3, 255, 255, 255));   // 白 70%
+
+        // 「歌手 — 專輯」（只有一個就只放那個）
+        static string Subtitle(NowPlaying.Track track)
+        {
+            return string.IsNullOrEmpty(track.Album) || track.Album == track.Title ? track.Artist
+                : string.IsNullOrEmpty(track.Artist) ? track.Album : track.Artist + " — " + track.Album;
+        }
+
+        // 歌名、「歌手 — 專輯」（沒有副標、只有歌名的影片：歌名改放在封面的中線上，見 titleY）。要跑馬燈的那行不畫
+        static void DrawInfo(DrawingContext dc, MusicCard card, string title, string subtitle, double titleY)
         {
             double s = card.Scale;
-            string subtitle = string.IsNullOrEmpty(track.Album) || track.Album == track.Title ? track.Artist
-                : string.IsNullOrEmpty(track.Artist) ? track.Album : track.Artist + " — " + track.Album;
-            // 沒有副標（只有歌名的影片）：歌名改放在封面的中線上
-            double titleY = string.IsNullOrEmpty(subtitle) ? CardPad + ArtSize / 2 + 6 : TitleY;
-            DrawText(dc, track.Title, 16 * s, FontWeights.SemiBold, Brushes.White, ColumnX * s, titleY * s, ColumnW * s, false);
-            DrawText(dc, subtitle, 13 * s, FontWeights.Normal, new SolidColorBrush(Color.FromArgb(0xB3, 255, 255, 255)), ColumnX * s, SubtitleY * s, ColumnW * s, false);
+            if (card.Title == null) DrawText(dc, title, 16 * s, FontWeights.SemiBold, Brushes.White, ColumnX * s, titleY * s, ColumnW * s, false);
+            if (card.Subtitle == null) DrawText(dc, subtitle, 13 * s, FontWeights.Normal, SubtitleBrush, ColumnX * s, SubtitleY * s, ColumnW * s, false);
         }
 
-        // ⏪ ⏯ ⏩（跟卡片其他圖一樣大小、一樣位置）：按播放暫停時只換這張，很快
-        // shuffle / repeat：隨機播放、循環的狀態（null：播放器不支援，畫得很淡）
-        public static int[] RenderButtons(MusicCard card, bool playing, bool? shuffle, int? repeat)
+        // 一行字放不下（比 ColumnW 寬）：整行畫成一張圖給跑馬燈（Apple Music：停一下、慢慢往左捲、兩端淡出、捲完接著下一份）。
+        // 放得下回傳 null。baseline 是 1080p、以卡片左上角為 0 的基線
+        static MarqueeLine RenderMarquee(MusicCard card, string text, double size, FontWeight weight, Brush brush, double baseline)
         {
-            return Layer(card, dc => DrawButtons(dc, card, playing, shuffle, repeat), true);
+            if (string.IsNullOrEmpty(text)) return null;
+            double s = card.Scale;
+            var ft = Text(text, size * s, weight, brush);
+            if (ft.Width <= ColumnW * s) return null;
+            int pad = (int)Math.Ceiling(10 * s);   // 字的柔光（Halo）
+            double left = card.InnerX + Math.Round(ColumnX * s), top = card.InnerY + Math.Round(baseline * s) - ft.Baseline;   // 跟 DrawText 一樣的位置
+            int x = (int)left - pad, y = (int)Math.Floor(top) - pad;
+            int w = (int)Math.Ceiling(ft.Width) + 2 * pad, h = (int)Math.Ceiling(ft.Height) + 2 * pad + 1;
+            var visual = new DrawingVisual();
+            using (var dc = visual.RenderOpen()) dc.DrawText(ft, new Point(pad, top - y));
+            visual.Effect = Halo(s);
+            var root = new ContainerVisual();
+            root.Children.Add(visual);
+            // 看得到的範圍就是文字欄：捲到左邊在字的起點消失（不會跑進離封面的那段距離）、右邊到 ColumnW 為止；
+            // 左邊多留 1 像素（字的邊緣反鋸齒不會被切掉）
+            return new MarqueeLine { Pixels = Snapshot(root, w, h), W = w, H = h, X = x, Y = y, TextW = ft.Width, ViewX = left - 1, ViewW = ColumnW * s + 1 };
         }
 
-        static void DrawButtons(DrawingContext dc, MusicCard card, bool playing, bool? shuffle, int? repeat)
+        // ⏪ ⏩、隨機播放、循環（跟卡片其他圖一樣大小、一樣位置；播放鍵另外兩張，見 DrawPlayKey）
+        // shuffle / repeat：隨機播放、循環的狀態（null：播放器不支援，畫得很淡）
+        public static int[] RenderButtons(MusicCard card, bool? shuffle, int? repeat)
+        {
+            return Layer(card, dc => DrawButtons(dc, card, shuffle, repeat), true);
+        }
+
+        static void DrawButtons(DrawingContext dc, MusicCard card, bool? shuffle, int? repeat)
         {
             double s = card.Scale;
             // 照 macOS 的實心符號：圓角三角形（兩個接在一起是上一首 / 下一首）、圓角直條（暫停）；▶ 最亮，旁邊兩個淡一點
@@ -185,11 +233,25 @@ namespace VideoWallpaper
             Action<double, Action> key = (alpha, draw) => { dc.PushOpacity(alpha); draw(); dc.Pop(); };
             // 上一首 / 下一首：播放器現在不能跳（例如單支影片）就很淡
             key(card.CanPrev ? 0.82 : 0.3, () => icon(PrevX, Skip(-1)));
-            key(0.95, () => { if (playing) DrawPause(dc, s); else icon(PlayX, RoundedTriangle(-7.5, 18, 16.5, 1, 2.2)); });
             key(card.CanNext ? 0.82 : 0.3, () => icon(NextX, Skip(1)));
             // 隨機播放、循環（Segoe 的圖示）：開著是全白、下面一個小點；關著半透明；播放器不支援就很淡
             mode(dc, s, ShuffleX, "\uE8B1", shuffle.HasValue, shuffle == true);
             mode(dc, s, RepeatX, repeat == 1 ? "\uE8ED" : "\uE8EE", repeat.HasValue, repeat.HasValue && repeat.Value != 0);
+        }
+
+        // 播放鍵：▶ 或 ⏸（pause），各畫成一張
+        static void DrawPlayKey(DrawingContext dc, double s, bool pause)
+        {
+            dc.PushOpacity(0.95);
+            if (pause) DrawPause(dc, s);
+            else
+            {
+                dc.PushTransform(new TranslateTransform(PlayX * s, ControlsY * s));
+                dc.PushTransform(new ScaleTransform(1.45 * s, 1.45 * s));   // macOS 的鍵比較大
+                dc.DrawGeometry(Brushes.White, null, RoundedTriangle(-7.5, 18, 16.5, 1, 2.2));
+                dc.Pop(); dc.Pop();
+            }
+            dc.Pop();
         }
 
         // 暫停：兩條圓角直條，直接照整數像素畫（不經過 1.45 倍的縮放：縮放後四條邊都落在半個像素上，邊緣會糊）

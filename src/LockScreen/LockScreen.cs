@@ -227,7 +227,8 @@ namespace VideoWallpaper
                 // 上一首 / 下一首能不能用變了（換歌的空檔播放器常常閃一下）：也只換按鈕那張
                 bool canChanged = card != null && track != null && (card.CanPrev != track.CanPrev || card.CanNext != track.CanNext);
                 if (canChanged) { card.CanPrev = track.CanPrev; card.CanNext = track.CanNext; }
-                if (card != null && (canChanged || playing != shownPlaying || shuffle != shownShuffle || repeat != shownRepeat)) ShowButtons(playing, shuffle, repeat);
+                if (card != null && (canChanged || shuffle != shownShuffle || repeat != shownRepeat)) ShowButtons(shuffle, repeat);
+                if (card != null && playing != shownPlaying) ShowPlaying(playing);
                 // 只有歌詞按鈕的狀態變了（開關歌詞、查到歌詞）：不用重畫卡片，花 0.3 秒慢慢變
                 if (micLevel != shownMicLevel) ShowMic(null, micLevel);
                 progress.Update(track, playing, false);
@@ -257,6 +258,11 @@ namespace VideoWallpaper
             SetCardLayer("musicInfo", c.Info, shift, 1, 0);
             SetCardLayer("musicCover", c.Cover, shift, 1, 0);
             SetCardLayer("musicButtons", c.Buttons, 0, 1, 0);
+            SetCardLayer("musicPlay", c.PlayKey, 0, playing ? 0 : 1, 0);
+            SetCardLayer("musicPause", c.PauseKey, 0, playing ? 1 : 0, 0);
+            SetMarqueeLayer("musicTitle", c.Title, shift);
+            SetMarqueeLayer("musicSubtitle", c.Subtitle, shift);
+            if (card != null) ZoomPlaying(playing);
             ShowMic(c, micLevel);
             progress.Update(track, playing, true);
             shownSong = card == null ? null : song;
@@ -313,13 +319,46 @@ namespace VideoWallpaper
             if (expectRepeat.HasValue && repeat.HasValue) { if (repeat == expectRepeat) expectRepeat = null; else repeat = expectRepeat; }
         }
 
-        void ShowButtons(bool playing, bool? shuffle, int? repeat)
+        void ShowButtons(bool? shuffle, int? repeat)
         {
-            shownPlaying = playing; shownShuffle = shuffle; shownRepeat = repeat;
-            SetCardLayer("musicButtons", LockClock.RenderButtons(card, playing, shuffle, repeat), 0, 1, 0);
+            shownShuffle = shuffle; shownRepeat = repeat;
+            SetCardLayer("musicButtons", LockClock.RenderButtons(card, shuffle, repeat), 0, 1, 0);
         }
 
-        void ShowPlaying(bool playing) { ShowButtons(playing, shownShuffle, shownRepeat); }
+        // 播放 / 暫停換了：▶ 和 ⏸ 兩張都在，舊的很快縮小淡出、新的從小放大彈出來（SF Symbols 換圖的樣子）；封面跟著縮放
+        void ShowPlaying(bool playing)
+        {
+            if (card == null) return;
+            shownPlaying = playing;
+            engine.FadeOverlay(primary.Handle, playing ? "musicPlay" : "musicPause", 0, 120, false);
+            engine.FadeOverlay(primary.Handle, playing ? "musicPause" : "musicPlay", 1, 180, false);
+            ZoomPlaying(playing);
+        }
+
+        // 播放鍵、封面的大小：播放鍵現在那張正常大小、另一張縮在 0.55 倍；
+        // 暫停時封面縮到 0.9 倍（Apple Music：不用看按鈕也知道停了），播放時帶一點彈性回到原本的大小
+        void ZoomPlaying(bool playing)
+        {
+            string show = playing ? "musicPause" : "musicPlay", hide = playing ? "musicPlay" : "musicPause";
+            engine.ZoomOverlay(primary.Handle, hide, 0.55, card.KeyX, card.KeyY, 0.25, 1);
+            engine.ZoomOverlay(primary.Handle, show, 1, card.KeyX, card.KeyY, 0.4, 0.55);
+            engine.ZoomOverlay(primary.Handle, "musicCover", playing ? 1 : 0.9, card.ArtX, card.ArtY, 0.5, playing ? 0.62 : 0.9);
+        }
+
+        // 跑馬燈的那行字（line 是 null：這首放得下，拿掉）：換歌時跟封面、歌名一起滑動
+        void SetMarqueeLayer(string name, LockClock.MarqueeLine line, int shift)
+        {
+            var c = card ?? new LockClock.MusicCard();
+            if (line == null)
+            {
+                engine.SetSlideOverlay(primary.Handle, name, null, 0, 0, 0, 0, OverlayLayer.CardContent, c.InnerX, c.InnerY, c.InnerW, c.InnerH, shift, 450, 1, 0);
+                return;
+            }
+            engine.SetSlideOverlay(primary.Handle, name, line.Pixels, line.W, line.H, line.X, line.Y, OverlayLayer.CardContent, c.InnerX, c.InnerY, c.InnerW, c.InnerH, shift, 450, 1, 0);
+            // 停 2.5 秒、每秒約 30 像素（1080p）往左捲，兩份相隔 40、兩端淡出 16
+            double s = c.Scale;
+            engine.SetMarquee(primary.Handle, name, line.TextW, 40 * s, line.ViewX, line.ViewW, 16 * s, 30 * s, 2500);
+        }
 
         // 按隨機播放 / 循環：圖示馬上換，不等播放器回報。循環照 Apple 的順序：關 → 全部 → 單曲 → 關
         void ToggleMode(string which)
@@ -330,14 +369,14 @@ namespace VideoWallpaper
             {
                 expectShuffle = !(shownShuffle == true);
                 NowPlaying.SetShuffle(expectShuffle.Value);
-                ShowButtons(shownPlaying, expectShuffle, shownRepeat);
+                ShowButtons(expectShuffle, shownRepeat);
             }
             else
             {
                 int now = shownRepeat ?? 0;
                 expectRepeat = now == 0 ? 2 : now == 2 ? 1 : 0;
                 NowPlaying.SetRepeat(expectRepeat.Value);
-                ShowButtons(shownPlaying, shownShuffle, expectRepeat);
+                ShowButtons(shownShuffle, expectRepeat);
             }
         }
 

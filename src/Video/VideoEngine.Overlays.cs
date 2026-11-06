@@ -56,8 +56,25 @@ namespace VideoWallpaper
             public double GlassRadius;
             public bool GlassReady;
             public int BlurX, BlurY, BlurW, BlurH;
+            // 縮放（暫停時封面縮小、播放鍵換圖）：以畫面上的 (ZoomCX, ZoomCY) 為中心，彈簧追 ZoomTo（null = 不縮放）
+            public Spring Zoom;
+            public double ZoomTo = 1, ZoomCX, ZoomCY, ZoomResponse = 0.5, ZoomDamping = 0.8;
+            public long ZoomAt;
+            // 跑馬燈（太長的歌名）：圖裡的字寬 MarqueeW，兩份一前一後相隔 MarqueeGap 往左捲，每次停 MarqueePause 毫秒再捲；
+            // 只在畫面上 (MarqueeViewX, 寬 MarqueeViewW) 看得到，兩端 MarqueeFade 的距離淡出（MarqueeW = 0：不捲）
+            public double MarqueeW, MarqueeGap, MarqueeSpeed, MarqueeViewX, MarqueeViewW, MarqueeFade;
+            public int MarqueePause;
+            public long MarqueeStart;
+            // 歌詞每一行的大小（Apple Music：唱到的那行正常大小、其他行小一點）：LineZoom 是長圖每一列的縮放（跟 Shade 一起換），
+            // LineAnchor 是那一列屬於的那行的中心（長圖的列），LineLeft 是字的左邊（圖裡的 x）：照這一點縮放，字的左邊不會跑
+            public float[] LineZoom, LineZoomFrom, LineAnchor;
+            public double LineLeft;
 
-            public bool Running(long now) { return Scroll.Running(now) || ShadeMix.Running(now) || Fade.Running(now) || Move.Running(now) || Dots && (!DotsPaused || DotsEasing); }
+            public bool Running(long now)
+            {
+                return Scroll.Running(now) || ShadeMix.Running(now) || Fade.Running(now) || Move.Running(now) || Dots && (!DotsPaused || DotsEasing)
+                    || Zoom != null && Zoom.Moving(ZoomTo, 0.0005) || MarqueeW > 0;
+            }
 
             public void Release()
             {
@@ -117,7 +134,9 @@ namespace VideoWallpaper
         // 露出的是長圖從第 scroll 列開始的部分；mask 是露出那段每一列的亮度（0～1，固定在畫面上），
         // shade 是長圖每一列的亮度（跟著長圖捲動，null = 都一樣亮），兩個相乘。出現時用 fadeMs 淡入。
         // blurred 是糊掉的同一張長圖、blur 是每一列要往它混多少（都可以是 null：不糊；退回 GDI 時也不糊）
-        public void SetScrollOverlay(IntPtr hwnd, string name, int[] pixels, int[] blurred, int width, int height, int x, int y, int viewH, float[] mask, float[] shade, float[] blur, double scroll, int fadeMs)
+        // zoom、anchor、left：每一行的大小（見 Overlay.LineZoom；null = 都一樣大）
+        public void SetScrollOverlay(IntPtr hwnd, string name, int[] pixels, int[] blurred, int width, int height, int x, int y, int viewH, float[] mask, float[] shade, float[] blur,
+            float[] zoom, float[] anchor, double left, double scroll, int fadeMs)
         {
             WithTarget(hwnd, delegate(Target t, long now)
             {
@@ -128,6 +147,7 @@ namespace VideoWallpaper
                 o.Mask = mask;
                 o.Shade = shade;
                 o.Blur = blur;
+                if (zoom != null && anchor != null) { o.LineZoom = zoom; o.LineAnchor = anchor; o.LineLeft = left; }
                 o.Scroll = new Tween(scroll);
                 o.Fade = new Tween(0, 1, now, fadeMs);
                 Replace(t, name, o);
@@ -147,7 +167,17 @@ namespace VideoWallpaper
                 Overlay old;
                 t.TryGet(name, out old);
                 if (old != null) t.Remove(name);
-                if (pixels == null) { if (old != null) old.Release(); return; }
+                if (pixels == null)
+                {
+                    if (old == null) return;
+                    if (shift == 0) { old.Release(); return; }
+                    // 換歌、新的這首沒有這張（例如新歌名放得下、不用跑馬燈）：舊的照樣滑出去、淡掉
+                    old.Move.Continue(old.Move.Value(now) - shift, ms, now);
+                    old.Fade.Retarget(0, ms, now);
+                    old.RemoveWhenFaded = true;
+                    t.Put(name + "#" + now, old);
+                    return;
+                }
 
                 var o = CreateOverlay(t, pixels, width, height, x, y);
                 o.Z = z;
@@ -164,10 +194,21 @@ namespace VideoWallpaper
                     }
                     o.Move = new Tween(shift, 0, now, ms);
                     o.Fade = new Tween(0, opacity, now, ms);   // 新的一邊滑進來一邊淡入
+                    if (old != null && old.Zoom != null)
+                    {
+                        // 新的一張從舊的現在的大小接著（換歌時正暫停著：新封面也是縮小的樣子）
+                        CopyZoom(old, o);
+                        o.Zoom = new Spring();
+                        o.Zoom.Jump(old.Zoom.X);
+                    }
                 }
                 else if (old != null)
                 {
                     o.Move = old.Move;
+                    CopyZoom(old, o);
+                    o.Zoom = old.Zoom;
+                    o.MarqueeW = old.MarqueeW; o.MarqueeGap = old.MarqueeGap; o.MarqueeSpeed = old.MarqueeSpeed; o.MarqueePause = old.MarqueePause;
+                    o.MarqueeViewX = old.MarqueeViewX; o.MarqueeViewW = old.MarqueeViewW; o.MarqueeFade = old.MarqueeFade; o.MarqueeStart = old.MarqueeStart;
                     double current = old.Fade.Value(now);
                     if (Math.Abs(current - opacity) > 0.001) o.Fade = new Tween(current, opacity, now, fadeMs);
                     old.Release();
@@ -176,9 +217,50 @@ namespace VideoWallpaper
             });
         }
 
+        static void CopyZoom(Overlay from, Overlay to)
+        {
+            to.ZoomTo = from.ZoomTo; to.ZoomCX = from.ZoomCX; to.ZoomCY = from.ZoomCY;
+            to.ZoomResponse = from.ZoomResponse; to.ZoomDamping = from.ZoomDamping; to.ZoomAt = from.ZoomAt;
+        }
+
+        // 這張圖以畫面上的 (cx, cy) 為中心縮放到 to 倍（彈簧：response 秒、阻尼 damping）；from ≥ 0 時先跳到 from 再開始
+        public void ZoomOverlay(IntPtr hwnd, string name, double to, double cx, double cy, double response, double damping, double from = -1)
+        {
+            WithOverlay(hwnd, name, delegate(Overlay o, long now)
+            {
+                if (o.Zoom == null) o.Zoom = new Spring();
+                if (from >= 0) o.Zoom.Jump(from);
+                o.ZoomTo = to; o.ZoomCX = cx; o.ZoomCY = cy; o.ZoomResponse = response; o.ZoomDamping = damping;
+            });
+        }
+
+        // 跑馬燈：圖裡的字寬 width（字從圖的左邊開始），畫面上只在 (viewX, 寬 viewW) 看得到；width = 0 停掉。
+        // 設定一樣（同一首歌重畫）就不重新開始
+        public void SetMarquee(IntPtr hwnd, string name, double width, double gap, double viewX, double viewW, double fade, double speed, int pauseMs)
+        {
+            WithOverlay(hwnd, name, delegate(Overlay o, long now)
+            {
+                if (o.MarqueeW != width || o.MarqueeViewX != viewX || o.MarqueeViewW != viewW) o.MarqueeStart = now;
+                o.MarqueeW = width; o.MarqueeGap = gap; o.MarqueeViewX = viewX; o.MarqueeViewW = viewW;
+                o.MarqueeFade = fade; o.MarqueeSpeed = speed; o.MarqueePause = pauseMs;
+            });
+        }
+
+        // 跑馬燈現在捲了多遠：停 MarqueePause 毫秒，再捲過一份（字寬 + 間隔）；捲完後面那份剛好在原本的位置，接著重來
+        static double MarqueeShift(Overlay o, long now)
+        {
+            double period = o.MarqueeW + o.MarqueeGap, travel = period / Math.Max(1, o.MarqueeSpeed) * 1000;
+            double t = (now - o.MarqueeStart) % (o.MarqueePause + travel);
+            if (t < o.MarqueePause) return 0;
+            double u = (t - o.MarqueePause) / travel;
+            // 開頭 0.4 秒慢慢加速、結尾 0.4 秒慢慢減速（一樣的曲線）：出發和停下的樣子一致，不會一下子衝出去、也不會撞到定點才停
+            double ramp = Math.Min(0.5, 400 / travel), full = 2 * ramp * (1 - ramp);
+            return period * (u < ramp ? u * u / full : u > 1 - ramp ? 1 - (1 - u) * (1 - u) / full : (u - ramp / 2) / (1 - ramp));
+        }
+
         // 捲動到長圖的第 to 列（從目前畫面上的位置接著捲，花 ms 毫秒）；
         // shade 不是 null 時，長圖每一列的亮度也在這段時間裡從現在的樣子慢慢變成 shade（blur 也一樣：每一列糊多少）
-        public void ScrollOverlay(IntPtr hwnd, string name, double to, int ms, float[] shade = null, float[] blur = null)
+        public void ScrollOverlay(IntPtr hwnd, string name, double to, int ms, float[] shade = null, float[] blur = null, float[] zoom = null)
         {
             WithOverlay(hwnd, name, delegate(Overlay o, long now)
             {
@@ -186,8 +268,10 @@ namespace VideoWallpaper
                 if (shade == null) return;
                 o.ShadeFrom = MixAt(o.ShadeFrom, o.Shade, o.ShadeMix, now);
                 o.BlurFrom = MixAt(o.BlurFrom, o.Blur, o.ShadeMix, now);
+                o.LineZoomFrom = MixAt(o.LineZoomFrom, o.LineZoom, o.ShadeMix, now);
                 o.Shade = shade;
                 if (blur != null) o.Blur = blur;
+                if (zoom != null) o.LineZoom = zoom;
                 o.ShadeMix = new Tween(0, 1, now, ms);
             });
         }
@@ -396,22 +480,39 @@ namespace VideoWallpaper
                     canvas.Glass(o, Math.Min(1, fade));
                     double offset = canvas.Snap(o.Move.Value(now));
                     int clip = o.Clip ? canvas.PushClip(o) : 0;
-                    canvas.Image(o, offset, Math.Min(1, fade));
+                    double zoom = 1;
+                    if (o.Zoom != null)
+                    {
+                        double dt = o.ZoomAt == 0 ? 0 : Math.Min(0.05, (now - o.ZoomAt) / 1000.0);   // 第一次直接是目標的大小
+                        o.ZoomAt = now;
+                        zoom = o.Zoom.Step(o.ZoomTo, o.ZoomResponse, o.ZoomDamping, dt);
+                    }
+                    if (o.MarqueeW > 0) canvas.Marquee(o, offset, MarqueeShift(o, now), Math.Min(1, fade));
+                    else if (Math.Abs(zoom - 1) > 0.0005) canvas.ImageZoomed(o, offset, Math.Min(1, fade), zoom, o.ZoomCX + offset, o.ZoomCY);
+                    else canvas.Image(o, offset, Math.Min(1, fade));
                     if (o.Clip) canvas.PopClip(clip);
                     continue;
                 }
                 // 捲動的疊圖：每 2 列一條，各自用遮罩（畫面上的位置）和長圖那幾列的亮度貼上去；
                 // 有糊掉的長圖時，照那幾列要糊多少，清楚的和糊掉的兩張交叉淡入淡出（Apple Music：離目前這行越遠越糊）
-                double top = canvas.Snap(o.Scroll.Value(now));
+                // 歌詞在卡片的玻璃裡：只畫到玻璃現在長到的地方（玻璃往上長、縮回去的途中，上緣以上的字不會先跑出來），
+                // 靠近上緣的那段柔和地淡出。玻璃還在長 / 縮的時候，字跟著玻璃從下面浮上來、沉下去（玻璃還差多少的 0.35），
+                // 上緣淡出的那段也拉長：字是慢慢浮現，不是被移動的邊一刀切進來
+                var lc = o.Follow == 2 ? t.Liquid : null;
+                double glassTop = lc != null && lc.Spec != null ? lc.Spec.Y - lc.Extended : double.MinValue;
+                double glassFade = lc != null && lc.Spec != null ? 14 * lc.Spec.Scale : 1;
+                double lift = 0;
+                if (lc != null && lc.Spec != null && lc.ExtendFull > 0)
+                {
+                    double gap = lc.ExtendFull - lc.Extended;   // 縮回去時越來越大；往上彈過頭時是負的（字也跟著往上一點）
+                    lift = 0.35 * gap;
+                    glassFade *= 1 + 1.5 * Math.Min(1, Math.Abs(gap) / (0.5 * lc.ExtendFull));
+                }
+                double top = canvas.Snap(o.Scroll.Value(now) - lift);
                 bool mixing = o.Shade != null && o.ShadeFrom != null && o.ShadeMix.Running(now);
                 bool blurMixing = o.Blur != null && o.BlurFrom != null && o.ShadeMix.Running(now);
                 double mix = mixing || blurMixing ? o.ShadeMix.Value(now) : 1;
                 bool blurred = o.D2DBlur != IntPtr.Zero && o.Blur != null;
-                // 歌詞在卡片的玻璃裡：只畫到玻璃現在長到的地方（玻璃往上長、縮回去的途中，上緣以上的字不會先跑出來），
-                // 靠近上緣的那段柔和地淡出
-                var lc = o.Follow == 2 ? t.Liquid : null;
-                double glassTop = lc != null && lc.Spec != null ? lc.Spec.Y - lc.Extended : double.MinValue;
-                double glassFade = lc != null && lc.Spec != null ? 14 * lc.Spec.Scale : 1;
                 for (int row = 0; row < o.ViewH; row += 2)
                 {
                     int h = Math.Min(2, o.ViewH - row);
@@ -422,10 +523,13 @@ namespace VideoWallpaper
                     if (o.Shade != null) alpha *= mixing ? o.ShadeFrom[at] + (o.Shade[at] - o.ShadeFrom[at]) * mix : o.Shade[at];
                     if (alpha <= 0.004) continue;
                     double b = !blurred ? 0 : blurMixing ? o.BlurFrom[at] + (o.Blur[at] - o.BlurFrom[at]) * mix : o.Blur[at];
+                    // 這一行的大小：照那行的中心、字的左邊縮放（同一行的每一條接在一起，行跟行之間的空白跟著變寬變窄）
+                    double k = o.LineZoom == null ? 1 : mixing && o.LineZoomFrom != null ? o.LineZoomFrom[at] + (o.LineZoom[at] - o.LineZoomFrom[at]) * mix : o.LineZoom[at];
+                    double anchor = o.LineAnchor == null ? 0 : o.LineAnchor[at] - top;
                     // 先畫糊的、再把清楚的疊上去。一般的疊法下面那張會被上面那張蓋掉一部分，兩張交叉淡換的途中字會變暗：
                     // 清楚的那張照糊的那張平均蓋掉的比例補回來（糊掉的字筆畫散開，透明度大約只剩 0.3）
-                    if (b > 0.004) canvas.StripBlurred(o, row, h, source, Math.Min(1, alpha * b));
-                    if (b < 0.996) canvas.Strip(o, row, h, source, Math.Min(1, alpha * (1 - b) / (1 - 0.3 * Math.Min(1, alpha * b))));
+                    if (b > 0.004) canvas.StripZoomed(o, true, row, h, source, Math.Min(1, alpha * b), k, anchor);
+                    if (b < 0.996) canvas.StripZoomed(o, false, row, h, source, Math.Min(1, alpha * (1 - b) / (1 - 0.3 * Math.Min(1, alpha * b))), k, anchor);
                 }
                 if (o.Dots) DrawDots(canvas, o, now, fade * InGlass(o.Y + o.ViewH / 2.0, glassTop, glassFade));
             }

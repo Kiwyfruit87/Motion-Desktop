@@ -129,8 +129,10 @@ namespace VideoWallpaper
             Extension = (int)Math.Round(viewHeight + 4 * s);
             owner.Engine.SetLiquidExtend(primary.Handle, Extension);
             var mask = LockClock.LyricsMask(viewHeight, lineSpacing, lyrics.Synced);
+            // 每一行的大小：照那行的中心、字的左邊（長圖四周留給陰影的空間）縮放
+            var anchors = lyrics.Synced ? LockClock.LyricsAnchors(lyrics.SheetHeight, lineCenters, lineHeights) : null;
             owner.Engine.SetScrollOverlay(primary.Handle, sheetName, lyrics.Sheet, lyrics.SheetBlur, lyrics.SheetWidth, lyrics.SheetHeight, x, y, viewHeight, mask,
-                ShadeFor(shownLine), BlurFor(shownLine), ScrollFor(shownLine), 300);
+                ShadeFor(shownLine), BlurFor(shownLine), ZoomFor(shownLine), anchors, LockClock.ShadowPad(primary.Bounds.Height), ScrollFor(shownLine), 300);
             dotsLine = -1;
             UpdateDots(NowPlaying.Current, shownLine);
         }
@@ -156,7 +158,7 @@ namespace VideoWallpaper
                 // 正在拖進度條：歌詞稍微落後手指、緩緩地跟上（0.45 秒；還沒捲完又換行時從現在的位置接著捲），不會一格一格卡住
                 int ms = owner.Scrubbing ? 450 : Math.Abs(line - shownLine) > 2 ? 600 : 420;
                 shownLine = line;
-                owner.Engine.ScrollOverlay(owner.Primary.Handle, sheetName, ScrollFor(line), ms, ShadeFor(line), BlurFor(line));
+                owner.Engine.ScrollOverlay(owner.Primary.Handle, sheetName, ScrollFor(line), ms, ShadeFor(line), BlurFor(line), ZoomFor(line));
             }
             UpdateDots(track, line);
         }
@@ -202,6 +204,12 @@ namespace VideoWallpaper
         float[] BlurFor(int line)
         {
             return sheetLyrics.Synced ? LockClock.LyricsBlur(sheetLyrics.SheetHeight, lineCenters, lineHeights, lineSpacing, line) : null;
+        }
+
+        // 同上：唱到第 line 行時長圖每一列的大小（目前這行正常、其他行小一點）；一般歌詞都一樣大（null）
+        float[] ZoomFor(int line)
+        {
+            return sheetLyrics.Synced ? LockClock.LyricsZoom(sheetLyrics.SheetHeight, lineCenters, lineHeights, line) : null;
         }
 
         // 現在唱到第幾行（-1 = 還沒開始唱）；播放中稍微提早 0.2 秒，捲動完剛好對上（拖進度條時就照拖到的地方）。

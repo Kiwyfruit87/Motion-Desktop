@@ -20,6 +20,15 @@ namespace VideoWallpaper
             public virtual void ImageGrown(Overlay o, double growX, double growY, double opacity, double shiftX = 0) { Image(o, 0, opacity); }
             public abstract void Strip(Overlay o, int row, int height, double source, double alpha); // 捲動的歌詞：長圖第 source 列開始的一條
             public virtual void StripBlurred(Overlay o, int row, int height, double source, double alpha) { }   // 同上，糊掉的那張（只有 Direct2D 有）
+            // 同上，照 anchor（露出那段的第幾列）、字的左邊（o.LineLeft）縮放 k 倍；blurred：糊掉的那張。不能縮放的就照原本的大小
+            public virtual void StripZoomed(Overlay o, bool blurred, int row, int height, double source, double alpha, double k, double anchor)
+            {
+                if (blurred) StripBlurred(o, row, height, source, alpha); else Strip(o, row, height, source, alpha);
+            }
+            // 整張圖以畫面上的 (cx, cy) 為中心縮放 zoom 倍（不能縮放的就照原本的大小）
+            public virtual void ImageZoomed(Overlay o, double offset, double opacity, double zoom, double cx, double cy) { Image(o, offset, opacity); }
+            // 跑馬燈：往左捲了 shift（見 Overlay.Marquee*；不能捲的就照原本的樣子）
+            public virtual void Marquee(Overlay o, double offset, double shift, double opacity) { Image(o, offset, opacity); }
             // 液態玻璃卡片用（只有 Direct2D 做得到；GDI 不做）：
             public virtual void SetTransform(double sx, double sy, double dx, double dy) { }   // 接下來畫的整個變形（卡片的慣性）
             public virtual void FillSolid(double x, double y, double w, double h, double radius, double r, double g, double b, double a) { }
@@ -99,6 +108,45 @@ namespace VideoWallpaper
             {
                 d2d.Draw(o.D2DBlur, o.X, o.Y + row, o.W, height, source, alpha);
             }
+
+            public override void StripZoomed(Overlay o, bool blurred, int row, int height, double source, double alpha, double k, double anchor)
+            {
+                var bitmap = blurred ? o.D2DBlur : o.D2DBitmap;
+                if (bitmap == IntPtr.Zero) return;
+                if (Math.Abs(k - 1) < 0.0005) { d2d.Draw(bitmap, o.X, o.Y + row, o.W, height, source, alpha); return; }
+                d2d.DrawPart(bitmap, 0, source, o.W, height, o.X + o.LineLeft * (1 - k), o.Y + anchor + (row - anchor) * k, o.W * k, height * k, alpha);
+            }
+
+            public override void ImageZoomed(Overlay o, double offset, double opacity, double zoom, double cx, double cy)
+            {
+                d2d.DrawPart(o.D2DBitmap, 0, 0, o.W, o.H, cx + (o.X + offset - cx) * zoom, cy + (o.Y - cy) * zoom, o.W * zoom, o.H * zoom, opacity);
+            }
+
+            // 兩份一前一後；中間那段整張貼，兩端淡出的那段每 2 像素一條、各自照離邊緣多遠調亮度。
+            // 左邊的淡出跟著捲了多少出現、快捲完時收回去：停著的時候字的開頭是清楚的，捲到終點的樣子跟出發前完全一樣，不會跳一下
+            public override void Marquee(Overlay o, double offset, double shift, double opacity)
+            {
+                double v0 = o.MarqueeViewX + offset, v1 = v0 + o.MarqueeViewW, period = o.MarqueeW + o.MarqueeGap;
+                double right = o.MarqueeFade, left = o.MarqueeFade * Math.Min(1, Math.Min(shift, period - shift) / Math.Max(1, o.MarqueeFade));
+                double[] at = { o.X + offset - shift, o.X + offset - shift + period };
+                d2d.PushClip(v0 + left, o.Y, v1 - right - v0 - left, o.H);
+                foreach (double x in at) d2d.Draw(o.D2DBitmap, x, o.Y, o.W, o.H, 0, opacity);
+                d2d.PopClip();
+                for (double x = v0; x < v0 + left; x += 2) Column(o, at, x, Math.Min(2, v0 + left - x), opacity * Ease((x + 1 - v0) / left));
+                for (double x = v1 - right; x < v1; x += 2) Column(o, at, x, Math.Min(2, v1 - x), opacity * Ease((v1 - x - 1) / right));
+            }
+
+            void Column(Overlay o, double[] at, double x, double w, double alpha)
+            {
+                if (alpha <= 0.004) return;
+                foreach (double bx in at)
+                {
+                    double sx = x - bx, s0 = Math.Max(0, sx), s1 = Math.Min(o.W, sx + w);
+                    if (s1 > s0) d2d.DrawPart(o.D2DBitmap, s0, 0, s1 - s0, o.H, bx + s0, o.Y, s1 - s0, o.H, alpha);
+                }
+            }
+
+            static double Ease(double x) { x = Math.Max(0, Math.Min(1, x)); return x * x * (3 - 2 * x); }
 
             public override void SetTransform(double sx, double sy, double dx, double dy) { d2d.SetTransform(sx, sy, dx, dy); }
 

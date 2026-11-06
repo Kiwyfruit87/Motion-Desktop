@@ -18,6 +18,7 @@ namespace VideoWallpaper
     {
         GlassBackdrop glass;
         bool glassDecided;
+        Border catcher;   // 接住面板空白處的點擊（見 EnsureGlass）
         // 視窗四周留給玻璃的空間：影子要畫得下（下面影子比較長），邊緣往外取樣的折射也要取得到面板外面的畫面
         static readonly Thickness GlassInset = new Thickness(36, 36, 36, 48);
 
@@ -112,6 +113,11 @@ namespace VideoWallpaper
             try
             {
                 glass = new GlassBackdrop(content, outer, code);
+                // 第一層改由面板下面的視窗畫時，面板這塊在 WPF 裡是全透明的，透明的視窗點下去會穿過去：
+                // 在內容底下鋪一層幾乎看不出來的底色，點在面板空白處還是點在面板上。
+                // 不放在 root 裡（root 跟著出現 / 收起淡入淡出，太淡的話一樣會穿過去）；WPF 不拿它判斷點到什麼（照舊是 PanelGlass）
+                catcher = new Border { Margin = GlassInset, CornerRadius = new CornerRadius(PanelRadius), Background = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0)), IsHitTestVisible = false };
+                content.Children.Insert(content.Children.IndexOf(root), catcher);
                 System.Windows.Media.Effects.PixelShader.InvalidPixelShaderEncountered += delegate { window.Dispatcher.BeginInvoke(new Action(DropGlass)); };
             }
             catch { glass = null; }
@@ -123,6 +129,7 @@ namespace VideoWallpaper
             if (glass == null) return;
             glass.Remove();
             glass = null;
+            if (catcher != null) { content.Children.Remove(catcher); catcher = null; }
             root.Margin = new Thickness(0);
             Find<FrameworkElement>("PanelRim").Visibility = Visibility.Visible;
             dark = Theme.IsDark();
@@ -206,7 +213,6 @@ namespace VideoWallpaper
             lastFrame = time;
             double now = time.TotalSeconds;
 
-            if (glass != null) glass.Kick();   // 每一格叫背景執行緒抓一次後面的畫面
             StepPreview(dt);                    // 預覽換縮放模式時平順地變過去
 
             // 出現 / 收起來；收完了才真的把視窗藏起來
@@ -316,6 +322,8 @@ namespace VideoWallpaper
                 }
                 glass.Draw(false, lower, panelLook, glowAt, touchGlow, glowRadius, mask, maskRadius, glowStrength);
                 glass.Draw(true, upper, GlassLook.Top, glowAt, 0, glowRadius, Rect.Empty, 0, 0);
+                // 每一格叫背景執行緒抓一次後面的畫面；常數都交了才叫（顯示卡直接畫的第一層馬上照這一格的畫，不用等下一次）
+                glass.Kick();
             }
         }
 

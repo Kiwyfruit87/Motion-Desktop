@@ -87,7 +87,7 @@ namespace VideoWallpaper
             if (s == null) return;
             const double thick = 0.7;   // 面板固定 0.7（折射帶寬約 50 × 0.7 = 35，見 GlassLook.Base）
             s.X = tx; s.Y = ty; s.HalfW = tw; s.HalfH = th; s.Radius = tr;
-            s.Appear = appear; s.Energy = 0; s.Thick = thick;
+            s.Appear = appear; s.Energy = 0; s.Thick = thick; s.Bend = 1;
             s.TintR = s.TintG = s.TintB = s.TintA = 0;
             s.FillA = 0;
             s.D00 = 1; s.D01 = 0; s.D11 = 1;
@@ -195,7 +195,7 @@ namespace VideoWallpaper
         {
             double thick = Math.Max(0.6, Math.Min(1.5, Math.Min(W, H) / 40));
             s.X = X; s.Y = Y; s.HalfW = W; s.HalfH = H; s.Radius = H;
-            s.Appear = (1 - Solid) * appear; s.Energy = 0; s.Thick = thick;
+            s.Appear = (1 - Solid) * appear; s.Energy = 0; s.Thick = thick; s.Bend = 1;
             s.TintA = 0; s.FillA = 0;
             s.D00 = 1; s.D01 = 0; s.D11 = 1;
             s.Mag = 1.15; s.Shadow = 0;   // 中間放大一點（跟分段的透鏡同一套光學）；透明的透鏡沒有影子（實機）
@@ -311,7 +311,7 @@ namespace VideoWallpaper
         public void Shape(GlassShape s, double appear)
         {
             s.X = X; s.Y = Y; s.HalfW = W; s.HalfH = H; s.Radius = H;
-            s.Appear = (1 - SolidAmount) * appear; s.Energy = 0; s.Thick = Math.Max(0.6, Math.Min(1.5, Math.Min(W, H) / 40));
+            s.Appear = (1 - SolidAmount) * appear; s.Energy = 0; s.Thick = Math.Max(0.6, Math.Min(1.5, Math.Min(W, H) / 40)); s.Bend = 1;
             s.TintA = 0; s.FillA = 0;
             s.D00 = 1; s.D01 = 0; s.D11 = 1;
             s.Mag = Mag; s.Shadow = 0;
@@ -373,6 +373,7 @@ namespace VideoWallpaper
             catch (InvalidOperationException) { return false; }
             s.X = r.X + r.Width / 2; s.Y = r.Y + r.Height / 2; s.HalfW = r.Width / 2; s.HalfH = r.Height / 2; s.Radius = r.Height / 2;
             s.Appear = appear; s.Energy = 0; s.Thick = 0.6;
+            s.Bend = 0.3;   // 邊緣的扭曲只留三成：膠囊上下長邊把外面的東西折進來會變成兩個怪橢圓、兩端圓頭把圖示側邊扭彎（開關、分段的透鏡才要那麼強）
             s.TintA = 0; s.FillA = 0;
             s.D00 = 1; s.D01 = 0; s.D11 = 1;
             s.Mag = 1; s.Shadow = 0;
