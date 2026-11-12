@@ -25,6 +25,7 @@ namespace VideoWallpaper
             public int[] Mic, MicOn;  // 歌詞圓鈕上的圖示：白色（沒開）、深色（開著時底是白的）
             public CardColor Color;   // 重拍時邊框泛出的光暈（跟著封面的顏色）
             public string ColorKey;   // 顏色有沒有變（換歌時顏色變了才淡入淡出）
+            public bool HasArt;       // 有封面（還沒讀到封面時的顏色只是暫時的，先不要亮）
             public int Width, Height, X, Y;                // 每張圖的大小和位置（四周有留給光暈的空間）
             public int InnerX, InnerY, InnerW, InnerH;     // 卡片本身在螢幕上的範圍
             public double Scale, Radius;                   // 以 1080p 為 1 的縮放、卡片的圓角
@@ -69,6 +70,7 @@ namespace VideoWallpaper
             card.X = card.InnerX - pad; card.Y = card.InnerY - pad;
 
             var art = DecodeArt(track.Art, (int)Math.Round(300 * s));
+            card.HasArt = art != null;
             card.Chrome = Layer(card, dc => DrawChrome(dc, card));
             card.CanPrev = track.CanPrev; card.CanNext = track.CanNext;
             // 太長的歌名、副標拿出來做跑馬燈，Info 裡就不畫
@@ -97,12 +99,14 @@ namespace VideoWallpaper
             Func<double, double> sy = y => card.InnerY + y * s;
             double px0, px1;
             ProgressEnds(track.Duration.TotalSeconds, out px0, out px1);
-            card.ProgressLeft = sx(px0); card.ProgressWidth = (px1 - px0) * s;
+            // 按住時進度條兩端各往外長 grow（見引擎的 DrawLiquidControls）：拖曳照長大後的範圍換算，已播放的邊緣才會剛好在手指下面
+            double grow = Math.Round(4 * s);
+            card.ProgressLeft = sx(px0) - grow; card.ProgressWidth = (px1 - px0) * s + 2 * grow;
             card.Spec = new VideoEngine.LiquidCardSpec
             {
                 X = card.InnerX, Y = card.InnerY, W = card.InnerW, H = card.InnerH, Radius = card.Radius, Scale = s,
                 TintR = tint.R / top, TintG = tint.G / top, TintB = tint.B / top,
-                ProgressX0 = sx(px0), ProgressX1 = sx(px1), ProgressY = sy(ProgressY),
+                ProgressX0 = sx(px0), ProgressX1 = sx(px1), ProgressY = sy(ProgressY), ProgressGrow = grow,
                 LyricsX = sx(LyricsX), LyricsY = sy(LyricsY), LyricsR = LyricsR * s,
             };
 

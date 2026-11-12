@@ -64,6 +64,7 @@ namespace VideoWallpaper
             shownTime = key;
             // 拖曳中時間一秒變好幾次：先不加柔光（柔光要整張重算，很慢），放開時再整張重畫一次
             owner.SetCardLayer("musicTime", LockClock.RenderTime(card, position, duration, !scrubbing), 0, 1, 0);
+            owner.Engine.SplitOverlay(owner.Primary.Handle, "musicTime");   // 按住進度條時兩邊的時間讓開
         }
 
         // 卡片上顯示的位置（秒）：拖曳中是手指拖到的地方，其他時候同 Position（歌詞跟著它捲）

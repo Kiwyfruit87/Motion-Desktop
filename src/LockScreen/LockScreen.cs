@@ -207,9 +207,9 @@ namespace VideoWallpaper
         {
             bool sameTime = lastClock != null && lastClock.Time == clock.Time;
             engine.SetClock(primary.Handle, clock.Solid, clock.Field, clock.Width, clock.Height, clock.X, clock.Y, clock.Scale,
-                LockClock.ClockSlots(lastClock, clock), clock.TimeTop, clock.DigitCenterY, clock.DigitHeight, sameTime);
-            // 下次換分鐘只需要時間和每個字的位置（整張圖留著太佔記憶體）
-            lastClock = new LockClock.ClockImage { Time = clock.Time, CharX = clock.CharX };
+                LockClock.AllSlots(lastClock, clock), clock.TimeTop, clock.DigitCenterY, clock.DigitHeight, sameTime, clock.DateCenterY, clock.DateHeight);
+            // 下次換分鐘只需要時間、日期那一行的內容和每一段的位置（整張圖留著太佔記憶體）
+            lastClock = new LockClock.ClockImage { Time = clock.Time, CharX = clock.CharX, DateParts = clock.DateParts, DateX = clock.DateX };
         }
 
         // 右下角的音樂卡片：換歌、播放或暫停、封面變了才整張重畫；沒在播就拿掉。
@@ -436,12 +436,13 @@ namespace VideoWallpaper
         int lyricsArmedAt;
         double lyricsArmedDir;
 
-        // 重拍時邊框的光暈（跟著專輯封面的顏色）：換歌顏色變了就慢慢換過去（跟翻頁一樣 0.45 秒），卡片剛出現或拿掉時直接換
+        // 重拍時邊框的光暈（跟著專輯封面的顏色）：換歌顏色變了就慢慢換過去（0.7 秒，跟玻璃的色調一起），卡片剛出現或拿掉時直接換
         void ShowCardColor(LockClock.MusicCard c)
         {
             if (card != null && c.ColorKey == shownColorKey && colorShown) return;
-            int fade = card != null && colorShown ? 450 : 0;
+            int fade = card != null && colorShown ? 700 : 0;
             engine.SetFadeOverlay(primary.Handle, "musicColorGlow", c.Color == null ? null : c.Color.Glow, c.Width, c.Height, c.X, c.Y, OverlayLayer.CardEdge, fade, true);
+            if (fade > 0 && c.HasArt) engine.SwellCardGlow(primary.Handle);   // 換歌：邊框亮一下，看得到顏色換過去（封面還沒讀到時的顏色是暫時的，等封面來了再亮）
             shownColorKey = c.ColorKey;
             colorShown = card != null;
         }

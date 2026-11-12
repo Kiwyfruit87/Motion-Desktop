@@ -85,8 +85,8 @@ Texture2D BlurMTex : register(t5);   // 微糊（只有卡片用）：清楚和�
 cbuffer ClockAnim : register(b2)     // 換分鐘的動畫（沒有動畫時 Anim0.x 是 0）
 {
     float4 Anim0;      // 幾格、數字頂端再往上一點（以上是日期那一行，照常畫；畫面座標）、舊距離圖的左上角 xy
-    float4 Anim1;      // 舊距離圖的大小 xy
-    float4 Slot[30];   // 每格三個：左右邊界、用哪張圖（0 新、1 舊）、（不用）；中心 xy、遮罩的邊（畫面 y）、漸層寬；
+    float4 Anim1;      // 舊距離圖的大小 xy、日期那一行有沒有在動（z）、時間那一行有沒有在動（w）；沒在動的那一行照常畫
+    float4 Slot[48];   // 每格三個：左右邊界、用哪張圖（0 新、1 舊）、哪一行（0 時間、1 日期）；中心 xy、遮罩的邊（畫面 y）、漸層寬；
                        //   現在的左右位移、看得到哪一邊（1：邊以下；−1：邊以上）、（不用）
 };
 SamplerState Lin : register(s0);
@@ -254,13 +254,14 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
     if (E.x > 0.5)   // 卡片的液態玻璃（見 Look.Clear）
     {
         // 邊：外圍一圈（bev，1080p 約 45 像素）像液體的彎月面往外取樣，把外面的東西壓進來——
-        // 位移 = Refract × bev × t²（t：1 在邊上、0 在折射帶的內緣），內緣斜率 0、平順地接到中央，最外緣約 40 像素；上下直邊打折（Focus，背景的字不會被拉長），
+        // 位移 = Refract × bev × t³（t：1 在邊上、0 在折射帶的內緣），從邊往內很快衰減（離邊 10 像素剩約一半、20 像素剩 15%），中央完全不動；
+        // 最外緣約 20 像素；上下直邊打折（Focus，背景的字不會被拉長），
         // 圓角加強約 30%（卡片的 Focus 0.45 × 0.7；曲面在圓角裡轉得最快，厚玻璃的圓角本來就折得最明顯；方向跟著邊的法線連續地轉，整個圓角是一片連續的曲面）
         float cu = max(-h.d, 0.0);
         float2 nn = n / max(length(n), 1e-4);
         float bev = max(A.w * s * h.thick, 1e-3);
         float ct = 1.0 - saturate(cu / bev);
-        float cdisp = A.z * bev * ct * ct * (1.0 - h.focus * (h.flat - 0.7 * h.corn));
+        float cdisp = A.z * bev * ct * ct * ct * (1.0 - h.focus * (h.flat - 0.7 * h.corn));
         float2 coff = n * cdisp * a;
         // 色差只在最外緣；上下直邊（背景的字、燈是橫的，會拉成彩色的條紋）少一半，圓角裡壓得最緊，幾乎拿掉（不然會有彩色的雜點）
         float cca = B.x * ct * ct * ct * (1.0 - 0.5 * h.flat) * (1.0 - 0.95 * h.corn);
@@ -306,15 +307,15 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
         // 暗的地方不加、反而收一點：燈和暗部散射在一起是暗的橘色（就是棕色），暗部偏中性，看起來才是暗的玻璃、不是一層棕色的膜
         float cchroma = max(ccol.r, max(ccol.g, ccol.b)) - min(ccol.r, min(ccol.g, ccol.b));
         float csat = lerp(B.z, 1.0, smoothstep(0.2, 0.6, cchroma));
-        csat = lerp(0.82, csat, smoothstep(0.1, 0.42, Luma(ccol)));
+        csat = lerp(0.9, csat, smoothstep(0.1, 0.42, Luma(ccol)));
         ccol = saturate(lerp(Luma(ccol).xxx, ccol, lerp(1.0, csat, a)));
         // 霧（TintAmt）：一小部分是均勻的淡光（帶一點附近背景的色調）；大部分是周圍的光在玻璃裡散開——最糊的那張用 screen 疊，
         // 亮的地方多、暗的地方少、顏色跟著底下的環境，所以霧本身就有冷暖、明暗的層次，不是一整片一樣的乳白（暗的桌布上霧比較少，深色更有深度）
         float3 cenv = BlurBTex.SampleLevel(Lin, (p - BlurRect.xy) / BlurRect.zw, 0).rgb;
         float cL = Luma(cenv);
-        float3 ctone = lerp(float3(1.0, 1.0, 1.0), saturate(Hue(cenv) * 0.85 + 0.15), 0.15);
+        float3 ctone = lerp(float3(1.0, 1.0, 1.0), saturate(Hue(cenv) * 0.85 + 0.15), 0.5);
         ccol = lerp(ccol, ctone, 0.55 * B.w * a);
-        ccol = 1.0 - (1.0 - ccol) * (1.0 - saturate(lerp(cL.xxx, cenv, 0.3) * 1.5 + 0.02) * B.w * a);   // 顏色只帶三成：霧不會把整片染得更鮮
+        ccol = 1.0 - (1.0 - ccol) * (1.0 - saturate(lerp(cL.xxx, cenv, 0.65) * 1.5 + 0.02) * B.w * a);   // 霧的顏色大部分來自環境（中性的霧會把暖色沖淡）
         float2 ctop = Shape[0].xy - Shape[0].zw;
         float2 cq = (p - ctop) / max(2.0 * Shape[0].zw, 1.0);   // 卡片裡的位置（左上 0、右下 1；卡片是第一塊）
         // 環境的色溫：卡片外面左、右、上、下四點（最糊的那張，邊外 36 像素）照卡片裡的位置平順地內插，
@@ -330,7 +331,7 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
         // 一側是暖燈、一側是冷色的夜景才會分出冷暖
         // （每個通道先加一點底再相除：純色、全黑的環境比值才會是 1，不會把某個通道放大好幾倍；倍率再夾在 0.9～1.15）
         float3 crel = (camb + 0.03) / (cavg + 0.03);
-        ccol = saturate(ccol * clamp(lerp(float3(1.0, 1.0, 1.0), crel / max(Luma(crel), 0.05), 0.09 * a), 0.9, 1.15));
+        ccol = saturate(ccol * clamp(lerp(float3(1.0, 1.0, 1.0), crel / max(Luma(crel), 0.05), 0.12 * a), 0.9, 1.15));
         // 中央的環境色：玻璃後面這一帶（最糊的那張，約 50 像素的範圍）比整張卡片後面的平均色（卡片裡五點）偏哪個顏色，就在玻璃裡再偏一點
         // （燈那邊微暖、冷色的背景那邊微冷，過渡跟著最糊的那張一樣平順）。大家共有的那層色調不動（只在中央收的話，單色的桌布上中央會比外圈灰、看得出一個框）。
         // 只動色度、亮度不變（色度的亮度是 0），整體飽和度也不提高——同樣是深色霧面，只是顏色有空間上的深淺，不是一層均勻的棕。
@@ -343,8 +344,8 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
         float cmidK = smoothstep(0.3 * bev, bev, cu) * (0.4 + 0.6 * smoothstep(0.03, 0.25, Luma(ccol))) * saturate(Luma(ccol) / max(Luma(cwide), 0.03)) * a;
         // （差得越多放大得越少：本來就很明顯的冷暖、顏色不會被推成色塊，主要是把細微的變化帶出來）。
         // 加完以後色度的大小最多比原本多 3%：顏色只是往附近環境的方向轉（燈旁邊暖一點、冷的那邊棕色退一點），不會整片變鮮
-        float3 cc0 = ccol - Luma(ccol), cc1 = cc0 + 0.3 * cdev / (1.0 + 3.0 * length(cdev)) * cmidK;
-        ccol = saturate(Luma(ccol) + cc1 * min(1.0, 1.03 * length(cc0) / max(length(cc1), 1e-4)));
+        float3 cc0 = ccol - Luma(ccol), cc1 = cc0 + 0.45 * cdev / (1.0 + 3.0 * length(cdev)) * cmidK;
+        ccol = saturate(Luma(ccol) + cc1 * min(1.0, 1.08 * length(cc0) / max(length(cc1), 1e-4)));
         // 玻璃的深度：越往中央越厚、吸收得越多——中央比外圍深約 5.5%，從邊往內約 90 像素平順地變深（不是一層均勻的膜；白字也更清楚一點）
         ccol *= 1.0 - 0.055 * smoothstep(0.0, 0.9 * min(Shape[0].z, Shape[0].w), cu) * a;
         // 亮的背景上壓暗一點（白字才清楚）：上面少、下面多，不是一整片均勻的灰；接近純白（雪地、白牆）再多壓一點，白字才不會幾乎看不見
@@ -410,9 +411,9 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
         ccol = lerp(ccol, renv, saturate(0.055 * ct * ct * ct * (0.4 + lit) * envK * a));
         // 約 1 像素的細高光（只有一條：離外緣 0.5 像素、寬 1.1，比 1 像素寬一點，沿著圓角的弧線才不會一格一格的）。
         // 受光的那段亮、背光的那段只剩很淡的輪廓（黑底上整圈的形狀也看得出來，外面越暗輪廓多一點），不是一圈一樣亮的描邊
-        float fr = (cu - 0.5 * s) / (1.1 * s);
-        float fline = 0.34 * lit * envK + 0.06 * (0.55 + 0.6 * lit) * (0.8 + 0.6 * (1.0 - smoothstep(0.0, 0.12, oL)));
-        ccol = lerp(ccol, renv, saturate(C.y * fline * exp(-fr * fr) * a));
+        float fr = (cu - 0.5 * s) / ((cu > 0.5 * s ? 1.8 : 1.1) * s);
+        float fline = 0.3 * lit * envK + 0.06 * (0.55 + 0.6 * lit) * (0.8 + 0.6 * (1.0 - smoothstep(0.0, 0.12, oL)));
+        ccol = lerp(ccol, renv, saturate(C.y * fline * (1.0 + 0.25 * h.corn) * (1.0 - 0.35 * smoothstep(0.55, 0.9, oL)) * exp(-fr * fr) * a));
         ccol = lerp(ccol, float3(1.0, 1.0, 1.0), 0.24 * h.energy * a);         // 按下：整塊被白光填滿
         float2 cgp = p - Touch.xy, cgq = p - Touch2.xy;
         ccol += a * 0.13 * max(Touch.z * exp(-dot(cgp, cgp) / (2.0 * Touch.w * Touch.w + 1.0)), Touch2.z * exp(-dot(cgq, cgq) / (2.0 * Touch2.w * Touch2.w + 1.0)));
@@ -472,43 +473,44 @@ float4 Glass(float4 pos : SV_Position) : SV_Target
 }
 
 // ---------- 玻璃字（時鐘的數字，照 iOS 26 鎖定畫面「玻璃」時鐘、透明度最低的照片量出來的）----------
+// 以下是幾乎全黑的背景上清澈的樣子；其他背景見 TextGlass 開頭（字身變成帶背景顏色的磨砂玻璃）
 //   裡面：一扇清澈的窗，不放大、不染色、不改飽和度，只輕輕糊一點（細小的斑點抹掉、大的形狀還清楚），
 //         再加一層平平的、無色的白（暗的背景約 5%、亮的約 3%）；
 //   邊緣：只有最外緣一兩個像素往字裡面取樣（穿過邊的線條被彎成沿著邊的細鉤，筆畫下緣看起來像往下滴），邊上一點點色散；
 //         緊貼邊緣內側一段柔和的提亮；數字裡的洞（0、4、6、8、9 中間）那一側的邊有一條細暗帶；
 //   輪廓：約一像素的細線，顏色是背景提亮（不是純白），左上、右下各一段亮弧、兩端漸細，其他地方只剩很淡的暗線；
-//   沒有影子、沒有內線、沒有立體浮雕。
+//   沒有影子、沒有暗暈、沒有內線、沒有立體浮雕。
 // 字形距離圖貼在 Shape[0]（左上角 xy、大小 zw）：r 是離字的邊多遠（字裡面是負的）、g 是離洞多遠（像素）、b 是字的大小（時間 1，日期比較小）；
 // A.z、A.w 是邊緣往裡取樣的強度和衰減（1080p 的像素）；B.x 色散（像素）、B.y 模糊；C.x 白的濃度、C.y 輪廓線
 float3 FieldAt(float2 p) { return FieldTex.SampleLevel(Lin, (p - Shape[0].xy) / Shape[0].zw, 0).rgb; }
 
 // 換分鐘的動畫：在新 / 舊距離圖的 (x0, x1) 這一格裡取 q 的距離；超出這一格的地方用格子邊上的值加上超出的距離（距離才是連續的）
-float3 SlotField(float2 q, float x0, float x1, bool old)
+float3 SlotField(float2 q, float x0, float x1, bool old, bool top)
 {
     float4 r = old ? float4(Anim0.zw, Anim0.zw + Anim1.xy) : float4(Shape[0].xy, Shape[0].xy + Shape[0].zw);
-    float2 qc = float2(clamp(q.x, x0, x1), clamp(q.y, Anim0.y, r.w - 1.0));
+    float2 qc = float2(clamp(q.x, x0, x1), top ? clamp(q.y, r.y, Anim0.y - 1.0) : clamp(q.y, Anim0.y, r.w - 1.0));
     float3 f = old ? OldFieldTex.SampleLevel(Lin, (qc - Anim0.zw) / Anim1.xy, 0).rgb : FieldAt(qc);
     f.x += length(q - qc);
     return f;
 }
 
 // 這一點的距離圖。換分鐘的動畫中，時間那一行由每一格拼起來：每個字照自己的位置取距離，再乘上一道上下的漸層遮罩（字本身不變形）；
-// alpha 是遮罩在這一點的值（字看得到多少，外面那圈暗暈也跟著）；blur 留給以後用（現在是 0）
+// alpha 是遮罩在這一點的值（字看得到多少，外面那條細暗線也跟著）；blur 留給以後用（現在是 0）
 float3 FieldDH(float2 p, out float alpha, out float blur)
 {
     alpha = 1.0; blur = 0.0;
     int n = (int)Anim0.x;
     if (n == 0) return FieldAt(p);
     float3 best = float3(1e4, 1e4, 1.0);
-    if (p.y < Anim0.y) best = FieldAt(p);                      // 時間上面（日期那一行）照常
-    float pick = best.x;                                       // 選最近的字；遮罩淡的（快抹掉、剛長出來）算遠一點，不搶旁邊的字的暗暈
-    [loop] for (int i = 0; i < 10; i++)
+    if (p.y < Anim0.y ? Anim1.z < 0.5 : Anim1.w < 0.5) best = FieldAt(p);   // 沒在動的那一行照常
+    float pick = best.x;                                       // 選最近的字；遮罩淡的（快抹掉、剛長出來）算遠一點，不搶旁邊的字的細暗線
+    [loop] for (int i = 0; i < 16; i++)
     {
         if (i >= n) break;
         float4 a = Slot[i * 3], b = Slot[i * 3 + 1], c = Slot[i * 3 + 2];
         float al = saturate(c.y * (p.y - b.z) / max(b.w, 1e-3));
         if (al < 0.003) continue;
-        float3 f = SlotField(p - float2(c.x, 0.0), a.x, a.y, a.z > 0.5);
+        float3 f = SlotField(p - float2(c.x, 0.0), a.x, a.y, a.z > 0.5, a.w > 0.5);
         float fp = f.x + (1.0 - al) * 40.0 * A.y;
         if (fp < pick) { pick = fp; best = f; alpha = al; }
     }
@@ -519,22 +521,45 @@ float FieldD(float2 p) { float a = 1.0, b = 0.0; return FieldDH(p, a, b).r; }
 
 float4 TextGlass(float4 pos : SV_Position) : SV_Target
 {
+    // 參數跟著背景連續地變（量 iPhone 鎖定畫面的截圖：同樣亮度的桌布提亮的量不一樣，飽和度高的多）：
+    // 字身是微糊的背景加一層光（背景的明暗留八成多），顏色放大約 1.3～1.4 倍，所以字裡帶著背景的顏色；日期是帶一點背景色調的白字；沒有暗暈，字外只有一條細暗線，字內貼邊一條亮線。
+    // 幾乎全黑的背景還是清澈的玻璃；快要全白時加亮沒有空間了，翻成煙燻的玻璃（這點是我們自己加的，不是量到的）
     float2 p = pos.xy;
     float s = A.y;
     float3 bg = SceneTex.SampleLevel(Lin, (p - SceneRect.xy) / SceneRect.zw, 0).rgb;
     float alpha, blur;
     float3 dh = FieldDH(p, alpha, blur);
     float d = dh.x;
+    float soft = max(1.0, blur);
+    if (d > soft + 5.0 * s) return float4(bg, 1.0);            // 離字遠的地方什麼都不用算（下面的取樣只有字和緊鄰的幾像素才做）
     float clear = 1.0 - saturate(blur / (8.0 * s));           // 換分鐘時糊掉的字：邊緣的折射、亮邊跟著變淡
     float k = max(dh.z, 0.2);                                // 字的大小：小字的折射和模糊跟著縮小
-    // 背景很亮時（例如白天的天空）玻璃幾乎看不見：字外面加一圈很淡、很柔的暗暈，把字跟背景分開（暗的背景不加）
-    float bright = smoothstep(0.5, 0.85, Luma(BlurBTex.SampleLevel(Lin, (p - BlurRect.xy) / BlurRect.zw, 0).rgb));
-    float3 outside = bg * (1.0 - 0.07 * bright * alpha * exp(-max(d, 0.0) / (4.0 * s)));
-    float soft = max(1.0, blur);
-    if (d > soft) return float4(outside, 1.0);
+    float2 bu0 = (p - BlurRect.xy) / BlurRect.zw;
+    float3 wide = BlurBTex.SampleLevel(Lin, bu0, 0).rgb;      // 約 50 像素的重模糊：這一點附近的亮度、也是磨砂玻璃的底
+    float Lb = Luma(wide);
+    float bright = smoothstep(0.5, 0.85, Lb);
+    // 背景亮度：整個時鐘同一個值（左、中、右三點），整塊玻璃一起變，不會半個字清澈、半個字磨砂
+    float2 cc = Shape[0].xy + Shape[0].zw * 0.5, cu = float2(0.3 * Shape[0].z, 0.0);
+    float3 wall = (BlurBTex.SampleLevel(Lin, (cc - cu - BlurRect.xy) / BlurRect.zw, 0).rgb + BlurBTex.SampleLevel(Lin, (cc - BlurRect.xy) / BlurRect.zw, 0).rgb
+                + BlurBTex.SampleLevel(Lin, (cc + cu - BlurRect.xy) / BlurRect.zw, 0).rgb) / 3.0;
+    float Lall = Luma(wall);
+    float wmax = max(wall.r, max(wall.g, wall.b));
+    float Sall = (wmax - min(wall.r, min(wall.g, wall.b))) / max(wmax, 0.02);
+    // viv：背景鮮不鮮豔（看色度，最大減最小）。0 是照片那類（夜景、天空、海），1 是顏色很濃的桌布。
+    // 量 iPhone：鮮豔的桌布上字提亮得多、顏色放大、字外有暗線；照片上提亮少、顏色不放大、幾乎沒有暗線
+    float viv = smoothstep(0.06, 0.14, wmax - min(wall.r, min(wall.g, wall.b)));
+    // legible：0 是清澈的玻璃（暗的背景，完全不變）；1 是磨砂的玻璃。後面有一塊特別亮的東西（月亮、路燈）那裡也要變，所以取大的
+    // （原本 0.16 才完全變成提亮的玻璃；紐約夜景 Lall 0.106 卡在中間，字身混了 17% 清澈玻璃、變暗。iPhone 同樣暗的演唱會照片是完全提亮的）
+    float legible = smoothstep(0.03, 0.11, max(Lall, Lb));
+    // flip：背景亮到磨砂玻璃再提亮也沒有空間了（快要白）：整個時鐘翻成煙燻的玻璃
+    float flip = smoothstep(0.89, 0.93, Lall);
     // 1：日期那一行的小字。筆畫只有幾像素寬，邊緣的細鉤、洞的暗帶、內側提亮、暗線都會讓每一筆變成兩條線夾著（像空心字），
     // 小字不加這些，改成字本身的玻璃濃一點（一整塊）
     float small = 1.0 - smoothstep(0.4, 0.9, dh.z);
+    // 字外面只有一條貼著邊的細暗線（約 1 像素寬，保留背景的顏色），沒有大片的暗暈。中心在邊外 0.9 像素（0.5 的話正好落在反鋸齒的那一格、被吃掉大半）；
+    // 朝上的邊深一點（照 iPhone：上緣外的暗線最明顯）
+    float3 outside = bg * (1.0 - lerp(0.13, 1.0, viv) * (0.10 + 0.12 * saturate(-dot(normalize(float2(FieldD(p + float2(1.5 * s, 0.0)) - FieldD(p - float2(1.5 * s, 0.0)), FieldD(p + float2(0.0, 1.5 * s)) - FieldD(p - float2(0.0, 1.5 * s))) + 1e-5), float2(0.0, 1.0))) + 0.06 * bright * viv) * (1.0 - 0.8 * flip + 2.4 * flip * (1.0 - flip)) * legible * alpha * exp(-(d / s - 0.9) * (d / s - 0.9) / 0.72));   // 翻面的中途（亮暗對消）靠這條線撐
+    if (d > soft) return float4(outside, 1.0);
 
     // 邊緣的方向（字形距離圖的斜率，往字外面）、離邊多深（1080p 的像素）
     // 斜率取左右、上下各 2.5 像素（只差 1 像素的話，斜邊上方向會一格一格地跳，亮線、暗線跟著變成虛線）
@@ -542,34 +567,81 @@ float4 TextGlass(float4 pos : SV_Position) : SV_Target
     float2 g = float2(FieldD(p + float2(e, 0.0)) - FieldD(p - float2(e, 0.0)), FieldD(p + float2(0.0, e)) - FieldD(p - float2(0.0, e)));
     g = g / max(length(g), 1e-4);
     float u = max(-d, 0.0) / s;
-
-    // 最外緣往字裡面取樣（細鉤）；邊上一點點色散（紅往外、藍往內）
-    float hook = A.z * k * (1.0 - small) * clear * exp(-u / A.w) * (1.0 - smoothstep(3.0, 4.5, u));
-    float2 q = p - g * (hook * s);
-    float cab = B.x * exp(-u / 1.2) * s;
-    float3 col = float3(Look(q + g * cab, B.y * k).r, Look(q, B.y * k).g, Look(q - g * cab, B.y * k).b);
-
-    // 一層平平的、無色的白（暗的背景多一點）
-    float Lb = Luma(BlurBTex.SampleLevel(Lin, (p - BlurRect.xy) / BlurRect.zw, 0).rgb);
-    col += C.x * lerp(0.05, 0.028, smoothstep(0.08, 0.75, Lb));
+    // 時間那一行的筆畫比 Inter 粗（或細）時，貼邊的斜面、聚光、折射跟著筆畫寬度縮放：距離圖的 b 是時間的筆畫寬度是 Inter 的幾倍
+    // （見 LockClock.StrokeScale；日期那一行不縮）。一像素的亮線、暗線不縮（線寬是螢幕的像素）
+    float ks = lerp(max(dh.z, 1.0), 1.0, small), ub = u / ks;
 
     // 方向：左上、右下各一段亮弧（約 70°），兩端漸細
     float2 L = float2(-0.70710678, -0.70710678);
     float D = smoothstep(0.5, 0.92, max(dot(g, L), 0.9 * dot(g, -L)));
-    // 緊貼邊緣內側一段柔和的提亮；洞那一側的邊一條細暗帶
-    col += C.x * 0.12 * (1.0 - small) * exp(-u / 1.3) * (0.4 + 0.6 * D);
-    col += C.x * 0.05 * small * (1.0 - bright);              // 小字：暗的背景上多一點乳白
-    float hole = exp(-max(dh.y / s - 0.5, 0.0) / 1.5);
-    col *= 1.0 - 0.3 * (1.0 - 0.7 * bright) * (1.0 - small) * hole * exp(-u / 1.3);
-    col *= 1.0 - (0.14 + 0.14 * small) * bright;              // 亮的背景上變成淡淡的煙燻玻璃（還是透明的；小字濃一點）
-    // 輪廓：約一像素多的細線（中心在邊內 0.7 像素），顏色是背景提亮；亮弧的地方亮，其他地方只剩很淡的暗線
-    float rp = exp(-(u - 0.7) * (u - 0.7) / (2.0 * 0.7 * 0.7));
-    float ra = C.y * rp * (0.12 + 0.75 * D) * lerp(0.45, 0.85, smoothstep(0.05, 0.5, Lb)) * (1.0 - 0.4 * bright) * (1.0 - 0.5 * small);
-    col = lerp(col, lerp(bg, float3(1.0, 1.0, 1.0), 0.55), saturate(ra * clear));
+    // 磨砂玻璃的光（照 iPhone 截圖量到的）：光從上方偏左進來，右下（法線約 60°）那一側的邊把光聚起來，往內約 4 像素一段亮到接近白；
+    // 對面（左上）只有一條細亮線；兩側之間的邊（右上、左下）亮線內側稍微暗一點（斜面背光的那一面）
+    float gc = dot(g, float2(0.5, 0.8660254));
+    float Dc = smoothstep(0.3, 0.95, gc);
+    float Ds = smoothstep(0.3, 0.95, -gc);
+    float Dp = 1.0 - smoothstep(0.15, 0.5, abs(gc));     // 只有跟光的方向差不多垂直的邊（右上、左下），直的、橫的邊不算
+    float Dr = lerp(D, max(Dc, 0.85 * Ds), legible);       // 輪廓亮線的方向：清澈的玻璃照舊，磨砂的照上面
+    // 清澈的玻璃（legible 是 1 時完全被下面的磨砂蓋掉，跳過這九次取樣）
+    float3 col = 0.0;
+    [branch] if (legible < 0.999)
+    {
+        // 最外緣往字裡面取樣（細鉤）；邊上一點點色散（紅往外、藍往內）
+        float hook = A.z * k * (1.0 - small) * clear * exp(-u / A.w) * (1.0 - smoothstep(3.0, 4.5, u));
+        float2 q = p - g * (hook * s);
+        float cab = B.x * exp(-u / 1.2) * s;
+        col = float3(Look(q + g * cab, B.y * k).r, Look(q, B.y * k).g, Look(q - g * cab, B.y * k).b);
+        // 一層平平的、無色的白（暗的背景多一點）
+        col += C.x * lerp(0.05, 0.028, smoothstep(0.08, 0.75, Lb));
+        // 緊貼邊緣內側一段柔和的提亮；洞那一側的邊一條細暗帶
+        col += C.x * 0.12 * (1.0 - small) * exp(-u / 1.3) * (0.4 + 0.6 * D);
+        col += C.x * 0.05 * small * (1.0 - bright);          // 小字：暗的背景上多一點乳白
+        float hole = exp(-max(dh.y / s - 0.5, 0.0) / 1.5);
+        col *= 1.0 - 0.3 * (1.0 - 0.7 * bright) * (1.0 - small) * hole * exp(-u / 1.3);
+    }
+    // 中等以上亮度的背景：字變成提亮的玻璃；背景太亮時改成乘（煙燻的玻璃，飽和度拉回一點）
+    // 字身：微糊（約 6 像素，照 iPhone：字裡的顆粒、細線都糊掉，只留背景大片的明暗和顏色；混回原圖會像隔著一層霧看到原本的景）
+    // 字是有厚度的圓玻璃：貼邊往字裡面取樣，邊上偏 3.2 像素、往內很快變小；偏移變化得夠慢，越往內取樣點也一定越往內，
+    // 不會在字裡折回來（折回來的地方背景被鏡像、局部放大，小燈會變成一團亮斑）
+    float2 pr = p - g * (3.2 * s * ks * exp(-ub / 3.5) * (1.0 - smoothstep(8.0, 10.0, ub)) * clear);
+    float3 frost = BlurMTex.SampleLevel(Lin, (pr - BlurRect.xy) / BlurRect.zw, 0).rgb;
+    // 提亮：背景加一層光（照 iPhone 同一張紫色桌布量到的：字身亮度 ≈ 0.86×背景 + 0.33，背景的明暗留八成多），
+    // 後面的陰影、亮帶會穿過字繼續延伸，看起來才是透光的玻璃。往一個固定亮度拉（背景的明暗只剩四成）就是霧的算法，字變成一塊均勻的板子。
+    // 很暗的背景多加一點點；接近白時柔和地壓住
+    float Lf = Luma(frost);
+    // 照片類的背景（量 iPhone 的海景：天空 206 → 238、海 188 → 226）提亮少一點，亮的背景上字才不會變成一塊白、海平線在字裡還看得到
+    float Lt = lerp(0.80, 0.86, viv) * Lf + lerp(0.30, 0.33, viv) + 0.04 * (1.0 - smoothstep(0.05, 0.25, Lall)) + 0.06 * small;
+    Lt = Lt < 0.9 ? Lt : 0.9 + 0.08 * (1.0 - exp(-(Lt - 0.9) / 0.08));
+    // 色差的倍數看「色度」（最大減最小），不看 HSV 飽和度：深藍的夜景 HSV 飽和度有 0.37，色度其實只有 0.05，不該被當成鮮豔的背景
+    float cg = lerp(1.0, 1.4, viv);   // 照 iPhone：鮮豔的桌布色差放大約 1.4 倍，照片不放大（海景量到 0.86～1.0 倍）；放大到 2 倍會有通道頂滿、變成平塗的顏色
+    // 色差太大、某個通道會超過 1（或低於 0）時，整個色差一起縮（不是個別通道截掉：淺藍的天空截掉藍色會變成青色）
+    float3 cv = (frost - Lf) * cg;
+    float chi = max(cv.r, max(cv.g, cv.b)), clo = min(cv.r, min(cv.g, cv.b));
+    cv *= saturate(min(max(1.0 - Lt, 0.0) / max(chi, 1e-4), Lt / max(-clo, 1e-4)));
+    float3 lifted = Lt + cv;
+    float3 smoked = frost * 0.54;
+    smoked = saturate(lerp(Luma(smoked).xxx, smoked, 1.3) + 0.12 * (1.0 - small) * exp(-ub / 2.5) * (0.3 + 0.7 * D));   // 煙燻的玻璃：貼邊 2～3 像素柔和地亮一點
+    col = lerp(col, lerp(lifted, smoked, flip), legible);
+    // 日期那一行不是玻璃，是往背景色相偏兩成的白字（量 iPhone：紫色桌布 (249,235,255)、桃紅 (255,225,255)、金色 (255,251,233)、
+    // 灰的照片就是純白；偏的比例都在 15～24%）。跟著這一點附近的背景走，同一行在不同顏色的地方顏色也不同；暗的背景上整個時鐘才不會變成一片灰霧
+    col = lerp(col, 1.0 - 0.2 * (1.0 - Hue(wide)), small * legible * (1.0 - flip));
+    float fr = legible * (1.0 - flip) * (1.0 - small);
+    // 聚光：保留色相地提亮（等比放大到最亮的通道接近滿，再加一點點），不是往白色拉
+    col = lerp(col, saturate(col * min(1.25, 1.0 / max(max(col.r, max(col.g, col.b)), 1e-3)) + 0.05), fr * 0.45 * Dc * exp(-ub / 2.0) * (1.0 - smoothstep(4.0, 7.0, ub)));
+    // 斜面（照 iPhone：往邊緣單調地變亮，上緣最多、下緣其次；左下只有一點點暗）
+    float bev = exp(-ub / 2.5) * (1.0 - smoothstep(3.0, 5.0, ub));
+    col *= 1.0 + fr * bev * (0.06 * saturate(-g.y) + 0.045 * saturate(g.y) - 0.015 * smoothstep(0.2, 0.9, dot(g, float2(-0.70710678, 0.70710678))));
+    // 輪廓：約一像素的細線（中心在邊內 0.5 像素）。提亮的玻璃上：保留字身的色相、往白推到六成五，強弱看方向
+    // （照 iPhone：上下兩條橫向的邊最亮、左右約三成、左下幾乎沒有，暗背景上也不減弱）；清澈的玻璃照舊
+    float rp = exp(-(u - 0.5) * (u - 0.5) / (2.0 * 0.42 * 0.42));
+    float Wr = lerp(0.3, 1.0, g.y * g.y) * (1.0 - 0.8 * smoothstep(0.75, 0.98, dot(g, float2(-0.70710678, 0.70710678)))) + 0.15 * saturate(g.x);
+    float ra = C.y * rp * lerp(0.12 + 0.75 * Dr, 1.0 * Wr, legible * (1.0 - flip)) * lerp(lerp(0.45, 0.85, smoothstep(0.05, 0.5, Lb)), 0.85, legible) * (1.0 - 0.4 * bright * (1.0 - legible)) * (1.0 - 0.5 * small) * (1.0 + 0.5 * legible) * (1.0 - flip * lerp(0.6, 1.0, small));
+    float rmx = max(col.r, max(col.g, col.b));
+    float3 rimc = lerp(lerp(bg, 1.0, 0.55), lerp(saturate(col * min(1.45, 1.0 / max(rmx, 1e-3))), 1.0, 0.65), legible);
+    col = lerp(col, rimc, saturate(ra * clear));
     // 很淡的暗線；亮的背景上整圈加深，輪廓才看得出來。比亮線往內、寬一點（中心在邊內 1.2 像素、寬約 2.6 像素）：
     // 線太細的話，斜的邊（例如 5 上面那段）每一列落在像素上的位置不同、深淺跟著跳，看起來像虛線、一格一格的階梯
     float rd = exp(-(u - 1.2) * (u - 1.2) / (2.0 * 1.3 * 1.3));
-    col *= 1.0 - (0.08 + 0.1 * bright) * alpha * (1.0 - small) * rd * (1.0 - 0.5 * D);
+    col *= 1.0 - (0.08 + 0.1 * bright) * (1.0 - legible * (1.0 - flip)) * (1.0 - 0.7 * legible) * alpha * (1.0 - small) * rd * (1.0 - 0.5 * Dr);
     return float4(lerp(outside, col, saturate(0.5 - d / soft) * alpha), 1.0);
 }
 ";
@@ -679,7 +751,7 @@ float4 TextGlass(float4 pos : SV_Position) : SV_Target
         readonly ClearStateFn clearState;
 
         IntPtr vs, downPs, blurPs, glassPs, textPs, sampler, glassBuffer, passBuffer, animBuffer;
-        public const int ClockAnimFloats = (2 + 30) * 4;   // 跟 cbuffer ClockAnim 一樣的排法
+        public const int ClockAnimFloats = (2 + 48) * 4;   // 跟 cbuffer ClockAnim 一樣的排法
         static readonly float[] noAnim = new float[ClockAnimFloats];
         readonly float[] glassData = new float[33 * 4];   // 跟 cbuffer GlassInfo 一樣的排法（33 個 float4）
         readonly float[] passData = new float[8];

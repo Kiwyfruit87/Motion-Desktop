@@ -70,7 +70,7 @@ namespace VideoWallpaper
             public int ClockOldX, ClockOldY, ClockOldW, ClockOldH;
             public float[] ClockSlots;
             public long ClockAnimStart;
-            public float ClockTimeTop, ClockDigitY, ClockDigitH;
+            public float ClockTimeTop, ClockDigitY, ClockDigitH, ClockDateY, ClockDateH;
             public bool ClockGlassOn, ClockFieldFailed;
             public int ClockBlurX, ClockBlurY, ClockBlurW, ClockBlurH;
             public long ClockBlurredAt = -100000;

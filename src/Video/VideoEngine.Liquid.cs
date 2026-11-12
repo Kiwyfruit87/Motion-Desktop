@@ -13,6 +13,7 @@ namespace VideoWallpaper
             public double X, Y, W, H, Radius, Scale;          // 卡片本身（不含影子的空間）、圓角、以 1080p 為 1 的縮放
             public double TintR, TintG, TintB;                // 封面的顏色（淡淡的有色玻璃）
             public double ProgressX0, ProgressX1, ProgressY;  // 進度條
+            public double ProgressGrow;                       // 按住進度條時兩端各往外長多少（整數像素，停住時字才清楚）
             public double LyricsX, LyricsY, LyricsR;          // 歌詞圓鈕的中心和半徑
         }
 
@@ -151,6 +152,7 @@ namespace VideoWallpaper
             public double TouchX, TouchY, TouchGlow, TouchAge;
             public double OldX, OldY, OldGlow, OldRadius;   // 上一次按的白光（很快又按一下時還沒退完）：留著照常慢慢退
             public bool Touching;
+            public long SwellAt;               // 換歌時邊框亮一下（見 CardSwell）：什麼時候開始的（0 = 沒有）
             public long LastTick;
             // 這一格算出來的樣子（畫的時候用）
             public double Progress = -1, ScrubAmount, OnAmount, LyricsAlpha;
@@ -167,14 +169,15 @@ namespace VideoWallpaper
         int featureLevel;
         // 兩層玻璃的質感（每一格重複用，不另外配置）。卡片（見 Look.Clear）：以字好讀為先的半透明霧面玻璃——
         // 中央的散射跟著背景調：背景平順 0.6（微糊和輕模糊之間），背景很雜（燈、輪廓、紋理）0.82（輕模糊和重模糊之間）；靠邊那一圈 0.4（透明一點，看得到折射）；
-        // 飽和度 1.25（暗的地方不加）、5% 帶一點環境色調的光；外圍折射帶 30 × 1.5 = 45（彎月面，最外緣往外取樣約 0.88 × 45 ≈ 40；上下直邊打折、圓角稍微加強，見卡片的 Focus）、
+        // 飽和度 1.25（暗的地方不加）、5% 帶一點環境色調的光；外圍折射帶 30 × 1.5 = 45（彎月面，最外緣往外取樣約 0.45 × 45 ≈ 20，往內很快衰減；上下直邊打折、圓角稍微加強，見卡片的 Focus）、
         // 色散 0.025（最外緣紅藍分開約 0.9 像素；分不到 0.12 像素的地方不算色散，省取樣）；細高光、內側提亮、細線的強度 1.15。
         // 之前的清澈版（中央 0.32、白霧 6.7%、折射帶 60、位移約 72）記在 E:\vw-tests\notes\clear_card；改成自適應之前的版本在 E:\vw-tests\cardlab\before
-        readonly LiquidGlass.Look cardLook = new LiquidGlass.Look { Clear = 1, Scatter = 0.6f, ScatterBusy = 0.82f, ScatterRim = 0.4f, Sat = 1.25f, TintAmt = 0.05f, Refract = 0.88f, Bevel = 30, Spec = 1.15f, CA = 0.025f, Legible = 0, Reflect = 0 };
+        readonly LiquidGlass.Look cardLook = new LiquidGlass.Look { Clear = 1, Scatter = 0.6f, ScatterBusy = 0.82f, ScatterRim = 0.4f, Sat = 1.25f, TintAmt = 0.05f, Refract = 0.45f, Bevel = 30, Spec = 1.15f, CA = 0.025f, Legible = 0, Reflect = 0 };
         readonly LiquidGlass.Look topLook = LiquidGlass.Look.OnTop(1);
         // 時鐘的玻璃數字（照 iOS 26 玻璃時鐘的照片量出來的，見 LiquidGlass 的 TextGlass；以下是 1080p 的像素）：
         // 邊緣往字裡面取樣的鉤 16、衰減 0.9（只在最外緣約 1～3 像素）、色散 0.4；裡面輕輕糊（0.15）、加一層無色的白；輪廓線 1
-        readonly LiquidGlass.Look clockLook = new LiquidGlass.Look { Refract = 16, Bevel = 0.9f, CA = 0.4f, Scatter = 0.15f, Legible = 1, Spec = 1 };
+        // Clear = 1：模糊時多算一層微糊（時鐘的字身要用，見 TextGlass 的 frost）；Clear 的另一個用處只在卡片的著色器裡，時鐘不讀
+        readonly LiquidGlass.Look clockLook = new LiquidGlass.Look { Refract = 16, Bevel = 0.9f, CA = 0.4f, Scatter = 0.15f, Legible = 1, Spec = 1, Clear = 1 };
 
         // ---------- 給 UI 執行緒用的指令 ----------
 
@@ -243,6 +246,24 @@ namespace VideoWallpaper
             });
         }
 
+        // 換歌、封面的顏色變了：邊框亮一下
+        public void SwellCardGlow(IntPtr hwnd)
+        {
+            WithTarget(hwnd, delegate(Target t, long now) { if (t.Liquid != null) t.Liquid.SwellAt = now; });
+        }
+
+        // 換歌時邊框的光現在多亮（0～1）：約 0.2 秒亮起來、0.45 秒開始退、1.6 秒退完。
+        // 光暈平常只有重拍才亮，換歌時節奏偵測又剛重置，顏色漸變都發生在暗的時候看不到；
+        // 這一下讓舊封面的顏色換到新封面的顏色看得見（節奏開關都有）。只亮一次，平常玻璃還是沒有自己的顏色
+        static double CardSwell(LiquidCard c, long now)
+        {
+            if (c.SwellAt == 0) return 0;
+            double t = (now - c.SwellAt) / 1000.0;
+            if (t < 0 || t >= 1.6) { c.SwellAt = 0; return 0; }
+            double up = Math.Min(1, t / 0.2), down = Math.Max(0, Math.Min(1, (t - 0.45) / 1.15));
+            return 0.8 * (up * up * (3 - 2 * up)) * (1 - down * down * (3 - 2 * down));
+        }
+
         // 按下 / 放開卡片上的玻璃按鈕（只有歌詞圓鈕：LyricsButton）
         public void PressLiquidButton(IntPtr hwnd, int button, bool down)
         {
@@ -297,14 +318,15 @@ namespace VideoWallpaper
         // 鎖定畫面的時鐘：solid 是實心的字、field 是字形距離圖（兩張一樣大，貼在 (x, y)；scale 以 1080p 為 1）。
         // 兩樣一起換（換分鐘時不會有一格是新的字配舊的玻璃）。畫得出玻璃時，實心字（clockDigits）就不畫；field 是 null 只用實心字。
         // slots 不是 null：換分鐘的動畫（見 LockClock.ClockSlots），舊的距離圖留著畫離開的字；timeTop、digitY、digitH 是時間那一行的上緣、數字的中心和高度
-        // sameTime：時間沒變（只有日期、天氣變了）——正在跑的換分鐘動畫留著，不要切掉
+        // sameTime：時間沒變（只有日期、天氣變了）——正在跑的換分鐘動畫留著，不要切掉（日期那一行自己有動畫要跑時例外）；
+        // dateY、dateH：日期那一行的中心和高度（日期、溫度、天氣圖示換掉時的動畫用）
         public void SetClock(IntPtr hwnd, int[] solid, float[] field, int width, int height, int x, int y, double scale,
-            float[] slots, float timeTop, float digitY, float digitH, bool sameTime)
+            float[] slots, float timeTop, float digitY, float digitH, bool sameTime, float dateY, float dateH)
         {
             WithTarget(hwnd, delegate(Target t, long now)
             {
                 Replace(t, "clockDigits", solid == null ? null : CreateOverlay(t, solid, width, height, x, y));
-                if (!sameTime || field == null) FreeClockOld(t);
+                if (!sameTime || field == null || slots != null) FreeClockOld(t);
                 if (slots != null && t.ClockView != IntPtr.Zero && field != null)
                 {
                     // 現在這張變成「舊的」，畫離開的字
@@ -312,7 +334,7 @@ namespace VideoWallpaper
                     t.ClockTexture = t.ClockView = IntPtr.Zero;
                     t.ClockOldX = t.ClockX; t.ClockOldY = t.ClockY; t.ClockOldW = t.ClockW; t.ClockOldH = t.ClockH;
                     t.ClockSlots = slots; t.ClockAnimStart = now;
-                    t.ClockTimeTop = timeTop; t.ClockDigitY = digitY; t.ClockDigitH = digitH;
+                    t.ClockTimeTop = timeTop; t.ClockDigitY = digitY; t.ClockDigitH = digitH; t.ClockDateY = dateY; t.ClockDateH = dateH;
                 }
                 FreeClockField(t);
                 t.ClockField = field;
@@ -391,19 +413,23 @@ namespace VideoWallpaper
             if (t.ClockSlots == null || t.ClockOldView == IntPtr.Zero) return false;
             double time = (now - t.ClockAnimStart) / 1000.0;
             const double OldTime = 0.06, NewDelay = 0.03, NewTime = 0.56, SlideTau = 0.125;
-            int n = Math.Min(10, t.ClockSlots.Length / 8);   // cbuffer 只放得下 10 格
+            int n = Math.Min(16, t.ClockSlots.Length / 8);   // cbuffer 只放得下 16 格
             double end = 0.8;
             for (int i = 0; i < n; i++) end = Math.Max(end, t.ClockSlots[i * 8 + 5] + (NewDelay + NewTime) * t.ClockSlots[i * 8 + 7] + 0.05);
             if (time > end) { FreeClockOld(t); return false; }
             var a = clockAnim;
             Array.Clear(a, 0, a.Length);
-            double h = t.ClockDigitH, top = t.ClockDigitY - 0.53 * h, bottom = t.ClockDigitY + 0.53 * h, span = bottom - top, w = 0.5 * h;
             a[0] = n; a[1] = t.ClockTimeTop; a[2] = t.ClockOldX; a[3] = t.ClockOldY;
             a[4] = t.ClockOldW; a[5] = t.ClockOldH;
             for (int i = 0; i < n; i++)
             {
                 int o = i * 8;
+                // 種類 10 以上是日期那一行的（同樣的三種動作，遮罩照那一行的高度）
                 int kind = (int)t.ClockSlots[o];
+                bool dateRow = kind >= 10;
+                if (dateRow) { kind -= 10; a[6] = 1; } else a[7] = 1;
+                double h = dateRow ? t.ClockDateH : t.ClockDigitH, mid = dateRow ? t.ClockDateY : t.ClockDigitY;
+                double top = mid - 0.53 * h, bottom = mid + 0.53 * h, span = bottom - top, w = 0.5 * h;
                 double s = time - t.ClockSlots[o + 5], slow = t.ClockSlots[o + 7];
                 bool up = t.ClockSlots[o + 6] > 0;
                 double edge = -1e5, side = 1, dx = 0;   // 看得到的是 side × (y − edge) > 0 那一邊，漸層寬 w
@@ -422,8 +448,8 @@ namespace VideoWallpaper
                     else { side = 1; edge = top - w + q * (span + w); }          // 從上面開始抹
                 }
                 int k = 8 + i * 12;
-                a[k] = t.ClockSlots[o + 1]; a[k + 1] = t.ClockSlots[o + 2]; a[k + 2] = kind == 2 ? 1 : 0;
-                a[k + 4] = t.ClockSlots[o + 3]; a[k + 5] = t.ClockDigitY; a[k + 6] = (float)edge; a[k + 7] = (float)w;
+                a[k] = t.ClockSlots[o + 1]; a[k + 1] = t.ClockSlots[o + 2]; a[k + 2] = kind == 2 ? 1 : 0; a[k + 3] = dateRow ? 1 : 0;
+                a[k + 4] = t.ClockSlots[o + 3]; a[k + 5] = (float)mid; a[k + 6] = (float)edge; a[k + 7] = (float)w;
                 a[k + 8] = (float)dx; a[k + 9] = (float)side;
             }
             return true;
@@ -476,7 +502,10 @@ namespace VideoWallpaper
                 else c.Progress = target;
             }
             else { c.Progress = -1; c.Sweeping = false; }
-            c.ScrubAmount = Math.Max(0, Math.Min(1, c.Scrub.Step(c.Scrubbing ? 1 : 0, 0.3, 0.85, dt)));
+            // 按住：很快長大、稍微衝過頭（約 8%）；放開：慢一點縮回、稍微縮過頭（約 16%）再彈回來。停住時剛好是 0 或 1（像素才對齊）
+            double scrubGoal = c.Scrubbing ? 1 : 0, scrubbed = c.Scrub.Step(scrubGoal, c.Scrubbing ? 0.26 : 0.42, c.Scrubbing ? 0.62 : 0.5, dt);
+            c.ScrubAmount = c.Scrub.Moving(scrubGoal, 0.002) ? scrubbed : scrubGoal;
+
 
             // 歌詞圓鈕（玻璃）按下的樣子，照原型：按下 0.03 秒後才開始放大、整顆被白光填滿，放開彈回；很快的一下也至少亮 0.12 秒
             long since = now - c.PressedAt;
@@ -631,13 +660,15 @@ namespace VideoWallpaper
             if (c == null || c.Spec == null) return;
             var spec = c.Spec;
             double s = spec.Scale;
-            // 進度條：高 6（按住時 9）、軌道白 29%（按住 35%；播放器不接受跳轉、不能拖時 20%）、已播放白 86%（按住 100%）；不知道歌曲長度就不畫
+            // 進度條：高 6（按住時 10，兩端也各往外長 ProgressGrow，兩邊的時間同時讓開）、軌道白 29%（按住 35%；播放器不接受跳轉、不能拖時 20%）、
+            // 已播放白 86%（按住 100%）；不知道歌曲長度就不畫。ScrubAmount 衝過頭時大小跟著彈，亮度不用
             if (c.Progress >= 0)
             {
-                double sc = c.ScrubAmount, ph = (6 + 3 * sc) * s, plen = spec.ProgressX1 - spec.ProgressX0;
-                canvas.FillSolid(spec.ProgressX0, spec.ProgressY - ph / 2, plen, ph, ph / 2, 1, 1, 1, c.CanSeek ? 0.29 + 0.06 * sc : 0.2);
+                double sc = c.ScrubAmount, lit = Math.Max(0, Math.Min(1, sc)), ph = (6 + 4 * sc) * s, grow = spec.ProgressGrow * sc;
+                double px = spec.ProgressX0 - grow, plen = spec.ProgressX1 - spec.ProgressX0 + 2 * grow;
+                canvas.FillSolid(px, spec.ProgressY - ph / 2, plen, ph, ph / 2, 1, 1, 1, c.CanSeek ? 0.29 + 0.06 * lit : 0.2);
                 double played = plen * c.Progress;
-                if (played > 0.5) canvas.FillSolid(spec.ProgressX0, spec.ProgressY - ph / 2, played, ph, ph / 2, 1, 1, 1, 0.86 + 0.14 * sc, spec.ProgressX0, plen);
+                if (played > 0.5) canvas.FillSolid(px, spec.ProgressY - ph / 2, played, ph, ph / 2, 1, 1, 1, 0.86 + 0.14 * lit, px, plen);
             }
             // 歌詞圓鈕的底：關著淡白 16.5%、開著白（236，淺色玻璃也不會被當成白字翻黑）；按下時跟玻璃一起放大
             double r = LyricsRadius(c), on = c.OnAmount, la = c.LyricsAlpha;

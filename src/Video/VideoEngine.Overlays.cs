@@ -69,6 +69,8 @@ namespace VideoWallpaper
             // LineAnchor 是那一列屬於的那行的中心（長圖的列），LineLeft 是字的左邊（圖裡的 x）：照這一點縮放，字的左邊不會跑
             public float[] LineZoom, LineZoomFrom, LineAnchor;
             public double LineLeft;
+            // 進度條兩端的時間（一張圖裡有左右兩段）：按住進度條時從進度條的正中間分開，左邊那段往左、右邊那段往右讓開
+            public bool ScrubSplit;
 
             public bool Running(long now)
             {
@@ -207,6 +209,7 @@ namespace VideoWallpaper
                     o.Move = old.Move;
                     CopyZoom(old, o);
                     o.Zoom = old.Zoom;
+                    o.ScrubSplit = old.ScrubSplit;
                     o.MarqueeW = old.MarqueeW; o.MarqueeGap = old.MarqueeGap; o.MarqueeSpeed = old.MarqueeSpeed; o.MarqueePause = old.MarqueePause;
                     o.MarqueeViewX = old.MarqueeViewX; o.MarqueeViewW = old.MarqueeViewW; o.MarqueeFade = old.MarqueeFade; o.MarqueeStart = old.MarqueeStart;
                     double current = old.Fade.Value(now);
@@ -215,6 +218,12 @@ namespace VideoWallpaper
                 }
                 t.Put(name, o);
             });
+        }
+
+        // 這張圖是進度條兩端的時間（見 Overlay.ScrubSplit）
+        public void SplitOverlay(IntPtr hwnd, string name)
+        {
+            WithOverlay(hwnd, name, delegate(Overlay o, long now) { o.ScrubSplit = true; });
         }
 
         static void CopyZoom(Overlay from, Overlay to)
@@ -450,6 +459,8 @@ namespace VideoWallpaper
             var canvas = t.Canvas;
             if (!canvas.Begin(t)) return false;
             bool animating = false;
+            double swell = t.Liquid != null ? CardSwell(t.Liquid, now) : 0;   // 換歌時邊框亮一下（跟重拍的光取亮的）
+            if (swell > 0) { glow = Math.Max(glow, swell); animating = true; }
             // 液態玻璃卡片：卡片內容（封面、文字、圖示）貼上去之前，引擎先畫進度條、圓鈕的底；
             // 卡片內容都貼完之後（下一張是歌詞、或全部畫完），再疊上第二層的小玻璃（歌詞圓鈕）
             bool card = t.Liquid != null && t.Liquid.Spec != null, controlsPending = card, topPending = card;
@@ -488,6 +499,12 @@ namespace VideoWallpaper
                         zoom = o.Zoom.Step(o.ZoomTo, o.ZoomResponse, o.ZoomDamping, dt);
                     }
                     if (o.MarqueeW > 0) canvas.Marquee(o, offset, MarqueeShift(o, now), Math.Min(1, fade));
+                    else if (o.ScrubSplit && t.Liquid != null && t.Liquid.Spec != null && t.Liquid.ScrubAmount != 0)
+                    {
+                        // 讓開的距離比進度條長的多 1（1080p），間隔才不會變窄；按滿時是整數像素，字是清楚的
+                        var ss = t.Liquid.Spec;
+                        canvas.ImageSplit(o, (ss.ProgressX0 + ss.ProgressX1) / 2, (ss.ProgressGrow + Math.Round(ss.Scale)) * t.Liquid.ScrubAmount, Math.Min(1, fade));
+                    }
                     else if (Math.Abs(zoom - 1) > 0.0005) canvas.ImageZoomed(o, offset, Math.Min(1, fade), zoom, o.ZoomCX + offset, o.ZoomCY);
                     else canvas.Image(o, offset, Math.Min(1, fade));
                     if (o.Clip) canvas.PopClip(clip);

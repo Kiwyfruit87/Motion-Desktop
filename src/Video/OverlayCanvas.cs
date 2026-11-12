@@ -27,6 +27,8 @@ namespace VideoWallpaper
             }
             // 整張圖以畫面上的 (cx, cy) 為中心縮放 zoom 倍（不能縮放的就照原本的大小）
             public virtual void ImageZoomed(Overlay o, double offset, double opacity, double zoom, double cx, double cy) { Image(o, offset, opacity); }
+            // 整張圖從畫面上的 x = at 分成左右兩段，左邊往左、右邊往右各挪 away（不能分的就照原本的樣子）
+            public virtual void ImageSplit(Overlay o, double at, double away, double opacity) { Image(o, 0, opacity); }
             // 跑馬燈：往左捲了 shift（見 Overlay.Marquee*；不能捲的就照原本的樣子）
             public virtual void Marquee(Overlay o, double offset, double shift, double opacity) { Image(o, offset, opacity); }
             // 液態玻璃卡片用（只有 Direct2D 做得到；GDI 不做）：
@@ -120,6 +122,16 @@ namespace VideoWallpaper
             public override void ImageZoomed(Overlay o, double offset, double opacity, double zoom, double cx, double cy)
             {
                 d2d.DrawPart(o.D2DBitmap, 0, 0, o.W, o.H, cx + (o.X + offset - cx) * zoom, cy + (o.Y - cy) * zoom, o.W * zoom, o.H * zoom, opacity);
+            }
+
+            public override void ImageSplit(Overlay o, double at, double away, double opacity)
+            {
+                d2d.PushClip(o.X, o.Y, at - o.X, o.H);
+                d2d.Draw(o.D2DBitmap, o.X - away, o.Y, o.W, o.H, 0, opacity);
+                d2d.PopClip();
+                d2d.PushClip(at, o.Y, o.X + o.W - at, o.H);
+                d2d.Draw(o.D2DBitmap, o.X + away, o.Y, o.W, o.H, 0, opacity);
+                d2d.PopClip();
             }
 
             // 兩份一前一後；中間那段整張貼，兩端淡出的那段每 2 像素一條、各自照離邊緣多遠調亮度。

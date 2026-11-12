@@ -26,6 +26,43 @@ namespace VideoWallpaper
             public string Time;
             public float[] CharX;
             public float TimeTop, DigitCenterY, DigitHeight;
+            // 日期那一行的動畫用：一段一段（星期、月、日、天氣圖示、溫度）的內容和左右邊界（每段兩個），這一行的垂直中心和高度
+            public string[] DateParts;
+            public float[] DateX;
+            public float DateCenterY, DateHeight;
+        }
+
+        // 日期那一行的動畫：只有變了的那幾段動（舊的抹掉、新的長出來，跟換分鐘同一種動作），沒變的滑到新位置（整行置中，寬度變了位置會跟著變）。
+        // 每格八個值，排法跟 ClockSlots 一樣，種類加 10（引擎用它分辨是哪一行）。沒變、或是沒有上一次的資料回傳 null
+        public static float[] DateSlots(ClockImage from, ClockImage to)
+        {
+            if (from == null || to == null || from.DateParts == null || to.DateParts == null || from.DateX == null || to.DateX == null) return null;
+            string[] a = from.DateParts, b = to.DateParts;
+            bool changed = a.Length != b.Length;
+            for (int i = 0; !changed && i < b.Length; i++) changed = a[i] != b[i];
+            if (!changed) return null;
+            var slots = new System.Collections.Generic.List<float>();
+            for (int i = 0; i < Math.Max(a.Length, b.Length); i++)
+            {
+                bool hasNew = i < b.Length, hasOld = i < a.Length;
+                float nx0 = hasNew ? to.DateX[i * 2] - 2 : 0, nx1 = hasNew ? to.DateX[i * 2 + 1] + 2 : 0;
+                float ox0 = hasOld ? from.DateX[i * 2] - 2 : 0, ox1 = hasOld ? from.DateX[i * 2 + 1] + 2 : 0;
+                if (hasNew && hasOld && a[i] == b[i]) { slots.AddRange(new[] { 10f, nx0, nx1, (nx0 + nx1) / 2, (ox0 + ox1) / 2 - (nx0 + nx1) / 2, 0f, 1f, 1f }); continue; }
+                if (hasNew) slots.AddRange(new[] { 11f, nx0, nx1, (nx0 + nx1) / 2, 0f, 0f, 1f, 1f });
+                if (hasOld) slots.AddRange(new[] { 12f, ox0, ox1, (ox0 + ox1) / 2, 0f, 0f, 1f, 1f });
+            }
+            return slots.ToArray();
+        }
+
+        // 時間和日期兩行的動畫合在一起（引擎最多 16 格；放不下時日期那一行不做動畫，直接換）
+        public static float[] AllSlots(ClockImage from, ClockImage to)
+        {
+            float[] time = ClockSlots(from, to), date = DateSlots(from, to);
+            if (time == null) return date != null && date.Length / 8 <= 16 ? date : null;
+            if (date == null || (time.Length + date.Length) / 8 > 16) return time;
+            var all = new float[time.Length + date.Length];
+            time.CopyTo(all, 0); date.CopyTo(all, time.Length);
+            return all;
         }
 
         // 換分鐘的動畫：舊時間 → 新時間，每個字一格（最多 10 格），每格八個值：
@@ -89,10 +126,10 @@ namespace VideoWallpaper
             return TimeText(now) + DateText(now) + (Weather.Current == null ? "" : Weather.Current.Fetched.Ticks.ToString());
         }
 
-        // 時間下面的日期（英文）：「Friday, October 3」
+        // 時間上面的日期（英文，照 iPhone / iPad 的鎖定畫面用縮寫、沒有逗號）：「Fri Oct 3」
         static string DateText(DateTime now)
         {
-            return now.ToString("dddd, MMMM d", CultureInfo.InvariantCulture);
+            return now.ToString("ddd MMM d", CultureInfo.InvariantCulture);
         }
 
         // 12 小時制：「9:02」（跟 iPhone 一樣不顯示 AM / PM）
@@ -106,28 +143,63 @@ namespace VideoWallpaper
         public static ClockImage RenderClock(DateTime now, int screenWidth, int screenHeight)
         {
             double s = screenHeight / 1080.0;
-            // 時間用 Inter 粗體（玻璃要夠粗才看得出折射和亮邊），日期半粗體；日期約是時間的 27%（照 macOS）
-            double timeSize = Math.Round(112 * s), dateSize = Math.Round(30 * s);
+            // 時間用 Inter 粗體（玻璃要夠粗才看得出折射和亮邊），日期半粗體；日期約是時間的 27%（照 macOS）。
+            // fonts\local 裡有字型的話時間改用它（見 ClockFont；粗細照字型檔本身）
+            var timeWeight = clockFontLocal ? FontWeights.Normal : FontWeights.Bold;
+            // 換上的字型比 Inter 窄的話放大：整串時間比原本寬三成（照 iPhone 的鎖定畫面，時間跟日期那一行差不多寬；
+            // 用固定的「00:00」量，倍數才不會每分鐘跟著數字變）
+            double fit = 1;
+            if (clockFontLocal)
+            {
+                double inter = new FormattedText("00:00", CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+                    new Typeface(CardFont, FontStyles.Normal, FontWeights.Bold, FontStretches.Normal), 100, Brushes.White, 1.0).Width;
+                double local = new FormattedText("00:00", CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+                    new Typeface(ClockFont, FontStyles.Normal, timeWeight, FontStretches.Normal), 100, Brushes.White, 1.0).Width;
+                if (local > 1) fit = Math.Max(1, Math.Min(3.5, 1.3 * inter / local));
+            }
+            double timeSize = Math.Round(112 * s * fit), dateSize = Math.Round(30 * s);
             double pad = Math.Ceiling(30 * s);   // 陰影需要的留白（也是玻璃邊緣取樣的空間）
 
-            var date = new TextBlock { FontFamily = CardFont, FontSize = dateSize, FontWeight = FontWeights.SemiBold, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center };
+            var date = new TextBlock { FontFamily = DateFont, FontSize = dateSize, FontWeight = dateFontLocal ? FontWeights.Normal : FontWeights.SemiBold, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center };
             TextOptions.SetTextFormattingMode(date, TextFormattingMode.Ideal);
-            date.Inlines.Add(new Run(DateText(now)));
+            string dateText = DateText(now);
+            date.Inlines.Add(new Run(dateText));
             var weather = Weather.Current;
+            // 日期那一行分成幾段（動畫用）：日期的每個詞、天氣圖示、溫度；每段的左右邊界（從這一行的左邊算，下面再換成畫面座標）
+            var dateTypeface = new Typeface(DateFont, FontStyles.Normal, dateFontLocal ? FontWeights.Normal : FontWeights.SemiBold, FontStretches.Normal);
+            var parts = new System.Collections.Generic.List<string>();
+            var partX = new System.Collections.Generic.List<double>();
+            for (int at = 0; at < dateText.Length; )
+            {
+                int end = dateText.IndexOf(' ', at);
+                if (end < 0) end = dateText.Length;
+                parts.Add(dateText.Substring(at, end - at));
+                partX.Add(TextWidth(dateText.Substring(0, at), dateTypeface, dateSize));
+                partX.Add(TextWidth(dateText.Substring(0, end), dateTypeface, dateSize));
+                at = end + 1;
+            }
             if (weather != null)
             {
-                double iconSize = Math.Round(dateSize * 1.15);
-                var icon = WeatherIcon(weather.Code, weather.IsDay, iconSize);
-                // 跟日期隔一段；圖示中心對齊文字的中間
-                icon.Margin = new Thickness(Math.Round(dateSize * 0.7), 0, Math.Round(dateSize * 0.22), Math.Round(dateSize * 0.36 - iconSize / 2));
+                // 圖示照它實際的形狀縮放：跟大寫字差不多高（月亮、太陽）、寬的（雲）不超過大寫字高的 1.5 倍；形狀的中心對齊大寫字的中間
+                double cap = dateTypeface.CapsHeight * dateSize;
+                var icon = WeatherIcon(weather.Code, weather.IsDay, cap * 1.15, cap * 1.5);
+                string tempText = (Math.Round(weather.TempC) + 0.0).ToString("0", CultureInfo.InvariantCulture) + "\u00B0";
+                double partAt = TextWidth(dateText, dateTypeface, dateSize) + Math.Round(dateSize * 0.32);
+                parts.Add("icon" + weather.Code + (weather.IsDay ? "d" : "n"));
+                partX.Add(partAt); partX.Add(partAt + icon.Width);
+                partAt += icon.Width + Math.Round(dateSize * 0.2);
+                parts.Add(tempText);
+                partX.Add(partAt); partX.Add(partAt + TextWidth(tempText, dateTypeface, dateSize));
+                // 跟兩邊的字各隔一點；放在基線上再往上抬，中心對到大寫字的一半高
+                icon.Margin = new Thickness(Math.Round(dateSize * 0.32), 0, Math.Round(dateSize * 0.2), cap / 2 - icon.Height / 2);
                 date.Inlines.Add(new InlineUIContainer(icon) { BaselineAlignment = BaselineAlignment.Baseline });
                 date.Inlines.Add(new Run((Math.Round(weather.TempC) + 0.0).ToString("0", CultureInfo.InvariantCulture) + "°"));   // + 0.0：−0 變成 0（不然會顯示「-0°」）
             }
             // 時間：大數字的行高上面留很多空，往上拉近日期一點
             var time = new TextBlock
             {
-                Text = TimeText(now), FontFamily = CardFont, FontSize = timeSize, FontWeight = FontWeights.Bold, Foreground = Brushes.White,
-                HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, -Math.Round(12 * s), 0, 0),
+                Text = TimeText(now), FontFamily = ClockFont, FontSize = timeSize, FontWeight = timeWeight, Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, -Math.Round(12 * s * fit), 0, 0),
             };
             TextOptions.SetTextFormattingMode(time, TextFormattingMode.Ideal);
             var lines = new StackPanel();
@@ -149,7 +221,7 @@ namespace VideoWallpaper
             image.X = (int)Math.Round((screenWidth - image.Width) / 2.0);       // 左右置中
             image.Y = (int)Math.Round(screenHeight * 0.095 - pad);               // 日期的頂端約在畫面高度的 9.5%
             // 每個字的左右邊界、數字的位置（換分鐘的動畫用）：用同樣的字型量每段前綴的寬度
-            var typeface = new Typeface(CardFont, FontStyles.Normal, FontWeights.Bold, FontStretches.Normal);
+            var typeface = new Typeface(ClockFont, FontStyles.Normal, timeWeight, FontStretches.Normal);
             var origin = time.TranslatePoint(new Point(0, 0), root);
             image.Time = time.Text;
             image.CharX = new float[time.Text.Length + 1];
@@ -157,24 +229,68 @@ namespace VideoWallpaper
                 image.CharX[i] = (float)(image.X + origin.X + (i == 0 ? 0 : new FormattedText(time.Text.Substring(0, i), CultureInfo.InvariantCulture,
                     FlowDirection.LeftToRight, typeface, timeSize, Brushes.White, 1.0).WidthIncludingTrailingWhitespace));
             var whole = new FormattedText(time.Text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, typeface, timeSize, Brushes.White, 1.0);
-            image.DigitHeight = (float)(timeSize * 0.727);                       // Inter 的數字高度（跟大寫一樣高）
+            image.DigitHeight = (float)(timeSize * (clockFontLocal ? typeface.CapsHeight : 0.727));   // 數字的高度（跟大寫一樣高；Inter 是 0.727）
             image.DigitCenterY = (float)(image.Y + origin.Y + whole.Baseline - image.DigitHeight / 2);
             image.TimeTop = image.DigitCenterY - image.DigitHeight * 0.56f;      // 數字頂端再往上一點（日期的字底在這之上）
+            var dateOrigin = date.TranslatePoint(new Point(0, 0), root);
+            image.DateParts = parts.ToArray();
+            image.DateX = new float[partX.Count];
+            for (int i = 0; i < partX.Count; i++) image.DateX[i] = (float)(image.X + dateOrigin.X + partX[i]);
+            image.DateHeight = (float)date.ActualHeight;
+            image.DateCenterY = (float)(image.Y + dateOrigin.Y + date.ActualHeight / 2);
             return image;
+        }
+
+        static double TextWidth(string text, Typeface typeface, double size)
+        {
+            if (text.Length == 0) return 0;
+            return new FormattedText(text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, typeface, size, Brushes.White, 1.0).WidthIncludingTrailingWhitespace;
         }
 
         // 字形距離圖，每個點四個值（交錯排）：
         //   離字的邊多遠（像素；字外面是正的、裡面是負的）：用 alpha 一半當邊界，兩邊各算一次到最近的另一邊的距離
         //   （Felzenszwalb 的距離轉換，跟圖的大小成正比）；
         //   離字裡的洞多遠（像素）：從圖的四邊往裡填，填不到的空白就是洞（0、6、9、a、o 中間），洞那一側的邊比較暗；
-        //   字的大小：第 split 列以上（日期那一行）是 topScale，以下（時間）是 1；第四個值不用。
+        //   字的大小：第 split 列以上（日期那一行）是 topScale，以下（時間）是 1（ComputeField 再換成筆畫寬度的倍數，見 StrokeScale）；第四個值不用。
         // 沒有任何字（都是正的）回傳 null
         // 從 RenderClock 畫好的形狀算出字形距離圖（Field），再把形狀丟掉。只用到陣列，可以在背景執行緒做（4K 時要零點幾秒）
         public static void ComputeField(ClockImage c)
         {
             if (c.Shape == null) return;
-            c.Field = Shrink(DistanceField(c.Shape, c.Width * 2, c.Height * 2, c.Split, c.TopScale, (int)Math.Max(16, 12 * 4 * c.Scale * c.Scale)), c.Width, c.Height);
+            c.Field = Shrink(DistanceField(c.Shape, c.Width * 2, c.Height * 2, c.Split, c.TopScale, (int)Math.Max(16, 12 * 4 * c.Scale * c.Scale),
+                (float)(2 * TimeRound * c.Scale), (float)(2 * DateRound * c.Scale)), c.Width, c.Height);
             c.Shape = null;
+            StrokeScale(c);
+        }
+
+        // 時間那一行的筆畫寬度是 Inter 粗體（1080p 約 16.5 像素）的幾倍，寫進距離圖時間那幾列的「字的大小」：
+        // 換了比較粗（或細）的字型時，玻璃貼邊的斜面、聚光、折射跟著筆畫寬度縮放（見 TextGlass 的 ks），一像素的亮線不縮。
+        // 量法：數字中段幾列裡每一段連續的「字裡面」的寬度取中位數（直的筆畫最多，橫的長段被中位數排掉）
+        static void StrokeScale(ClockImage c)
+        {
+            var f = c.Field;
+            if (f == null) return;
+            int w = c.Width, top = -1, bottom = -1;
+            for (int y = 0; y < c.Height; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    int o = (y * w + x) * 4;
+                    if (f[o + 2] > 0.99f && f[o] < 0) { if (top < 0) top = y; bottom = y; break; }
+                }
+            if (top < 0 || bottom - top < 10) return;
+            var runs = new System.Collections.Generic.List<int>();
+            for (int y = top + (bottom - top) * 2 / 5; y <= top + (bottom - top) * 13 / 20; y += 2)
+                for (int x = 0, start = -1; x <= w; x++)
+                {
+                    bool inside = x < w && f[(y * w + x) * 4 + 2] > 0.99f && f[(y * w + x) * 4] < 0;
+                    if (inside && start < 0) start = x;
+                    else if (!inside && start >= 0) { runs.Add(x - start); start = -1; }
+                }
+            if (runs.Count == 0) return;
+            runs.Sort();
+            float scale = (float)Math.Max(0.9, Math.Min(2.5, runs[runs.Count / 2] / (16.5 * c.Scale)));
+            for (int i = 0; i < f.Length; i += 4)
+                if (f[i + 2] > 0.99f) f[i + 2] = scale;
         }
 
         // 拿掉 d 底下所有的效果（天氣圖示的光暈之類；算字的形狀時不要）
@@ -202,15 +318,55 @@ namespace VideoWallpaper
             return small;
         }
 
-        static float[] DistanceField(int[] pixels, int w, int h, int split, float topScale, int minHole)
+        // 筆畫凸角磨圓的半徑（1080p 的像素）：時間 3、日期那一行 0.6（筆畫才約 4 像素寬，太大會把細的地方吃掉）。
+        // Inter 的轉角比 Apple 的字硬，字型不用換，距離圖上把轉角磨圓一點點
+        const double TimeRound = 3, DateRound = 0.6;
+
+        // 把字的凸角磨圓（先往內縮 r、再往外長 r：筆畫粗細不變，只有凸出去的角變成半徑 r 的圓弧）。
+        // 往內縮後的形狀照距離圖重新做成覆蓋率，再量一次到邊的距離（精確到像素裡面，弧線才不會一格一格的）
+        // 日期和時間的半徑不同，兩行分開算再合併（取近的）：同一張算的話，時間那一行靠近分界的地方會照時間的半徑外長，日期底下多出一條假的字
+        static float[] RoundCorners(float[] field, int w, int h, int split, float round, float topRound)
+        {
+            float[] top = RoundRows(field, w, h, 0, split, topRound), bottom = RoundRows(field, w, h, split, h, round);
+            for (int i = 0; i < top.Length; i++) top[i] = Math.Min(top[i], bottom[i]);
+            return top;
+        }
+
+        // 只算第 from ～ to − 1 列的字
+        static float[] RoundRows(float[] field, int w, int h, int from, int to, float r)
+        {
+            int n = w * h;
+            var shrunk = new int[n];
+            var inside = new bool[n];
+            for (int y = from; y < to; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    int i = y * w + x, alpha = (int)Math.Round(Math.Max(0f, Math.Min(1f, 0.5f - (field[i] + r))) * 255);
+                    shrunk[i] = alpha << 24;
+                    inside[i] = alpha >= 128;
+                }
+            var again = EdgeDistance(shrunk, inside, w, h);
+            for (int i = 0; i < n; i++) again[i] -= r;
+            return again;
+        }
+
+        static float[] DistanceField(int[] pixels, int w, int h, int split, float topScale, int minHole, float round = 0, float topRound = 0)
         {
             int n = w * h;
             var inside = new bool[n];
             bool any = false;
             for (int i = 0; i < n; i++) { inside[i] = ((pixels[i] >> 24) & 255) >= 128; any |= inside[i]; }
             if (!any) return null;
+            // 日期有往下伸的筆畫（y 的尾巴、逗號）會超過原本的分界：往下找到第一列空白的才是兩行真正的分界
+            for (int y = split, cut = -1; y < h && cut < 0; y++)
+            {
+                bool empty = true;
+                for (int x = 0; x < w && empty; x++) empty = !inside[y * w + x];
+                if (empty) { cut = y; split = y; }
+            }
             double[] toHole = SquaredDistance(Holes(inside, w, h, minHole), w, h, true);
             var field = EdgeDistance(pixels, inside, w, h);
+            if (round > 0) field = RoundCorners(field, w, h, split, round, topRound);
             var all = new float[n * 4];
             for (int i = 0; i < n; i++)
             {
@@ -388,92 +544,125 @@ namespace VideoWallpaper
             }
         }
 
-        // 天氣圖示（WMO 天氣代碼）
-        static FrameworkElement WeatherIcon(int code, bool day, double size)
+        // 天氣圖示（WMO 天氣代碼）：照 iPhone / iPad 鎖定畫面的樣子，白色單色、實心（跟日期的字同一個顏色，玻璃畫的時候也跟著日期變色）；
+        // 疊在一起的部分（雲前面的太陽、月亮、閃電）中間留一道細縫分開，不用顏色區分。形狀是自己畫的，沒用 Apple 的圖示
+        // maxH、maxW：縮放後最高、最寬多少（回傳的圖剛好包住形狀，沒有留白）
+        static FrameworkElement WeatherIcon(int code, bool day, double maxH, double maxW)
         {
-            var canvas = new Canvas { Width = size, Height = size };
-            var sun = Color.FromRgb(0xFD, 0xD6, 0x63);
-            var moon = Color.FromRgb(0xFF, 0xE9, 0xA8);
-            var cloud = Color.FromRgb(0xF1, 0xF3, 0xF4);
-            var rain = Color.FromRgb(0x8A, 0xB4, 0xF8);
-
-            if (code == 0)                       // 晴
+            double s = 100, gap = Math.Max(6, 130 / maxH);   // 先在 100 × 100 裡畫，最後再縮；疊在一起的形狀中間的縫縮完後至少約 1.3 像素
+            Geometry g;
+            if (code == 0)                                                           // 晴
+                g = day ? SunShape(s * 0.5, s * 0.5, s * 0.48) : MoonStars(s * 0.5, s * 0.52, s * 0.46);
+            else if (code == 1 || code == 2)                                         // 晴時多雲：雲前面露出太陽 / 月亮
             {
-                if (day) AddSun(canvas, size / 2, size / 2, size * 0.34, sun); else AddMoon(canvas, size / 2, size / 2, size * 0.36, moon);
+                var cloud = CloudShape(s * 0.2, s * 0.4, s * 0.8);
+                var back = day ? SunShape(s * 0.36, s * 0.36, s * 0.32) : (Geometry)Crescent(s * 0.38, s * 0.36, s * 0.27);
+                g = Union(Cut(back, cloud, gap), cloud);
             }
-            else if (code == 1 || code == 2)     // 晴時多雲
+            else if (code == 45 || code == 48)                                       // 霧：雲下面兩條橫線
             {
-                if (day) AddSun(canvas, size * 0.36, size * 0.34, size * 0.25, sun); else AddMoon(canvas, size * 0.36, size * 0.32, size * 0.27, moon);
-                AddCloud(canvas, size * 0.24, size * 0.46, size * 0.76, cloud);
-            }
-            else if (code == 45 || code == 48)   // 霧
-            {
-                for (int i = 0; i < 3; i++)
-                    AddBar(canvas, size * (0.1 + 0.08 * (i % 2)), size * (0.3 + 0.2 * i), size * 0.72, size * 0.09, cloud);
+                var lines = new GeometryGroup();
+                lines.Children.Add(Capsule(s * 0.12, s * 0.66, s * 0.76, s * 0.09));
+                lines.Children.Add(Capsule(s * 0.12, s * 0.82, s * 0.6, s * 0.09));
+                g = Union(Cut(CloudShape(s * 0.08, s * 0.08, s * 0.84), lines, gap), lines);
             }
             else
             {
-                AddCloud(canvas, size * 0.08, size * 0.18, size * 0.84, cloud);
-                if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82))            // 雨
-                    for (int i = 0; i < 3; i++) AddBar(canvas, size * (0.27 + 0.2 * i), size * 0.74, size * 0.07, size * 0.2, rain);
-                else if ((code >= 71 && code <= 77) || code == 85 || code == 86)          // 雪
-                    for (int i = 0; i < 3; i++) AddDot(canvas, size * (0.3 + 0.2 * i), size * 0.84, size * 0.06, cloud);
-                else if (code >= 95)                                                       // 雷雨
-                    canvas.Children.Add(new System.Windows.Shapes.Path
+                var cloud = CloudShape(s * 0.06, s * 0.08, s * 0.88);
+                var below = new GeometryGroup();
+                if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82))      // 雨：三條斜的雨滴
+                    for (int i = 0; i < 3; i++)
                     {
-                        Fill = new SolidColorBrush(sun),
-                        Data = Geometry.Parse(string.Format(CultureInfo.InvariantCulture, "M{0},{1} L{2},{3} L{4},{3} L{5},{6} L{7},{8} L{9},{8} Z",
-                            size * 0.52, size * 0.6, size * 0.4, size * 0.8, size * 0.5, size * 0.44, size, size * 0.62, size * 0.8, size * 0.52)),
-                    });
+                        var drop = Capsule(s * (0.3 + 0.2 * i) - s * 0.035, s * 0.66, s * 0.07, s * 0.24);
+                        drop.Transform = new RotateTransform(20, s * (0.3 + 0.2 * i), s * 0.78);
+                        below.Children.Add(drop);
+                    }
+                else if ((code >= 71 && code <= 77) || code == 85 || code == 86)    // 雪：雲下面的點
+                {
+                    below.Children.Add(new EllipseGeometry(new Point(s * 0.3, s * 0.74), s * 0.06, s * 0.06));
+                    below.Children.Add(new EllipseGeometry(new Point(s * 0.5, s * 0.86), s * 0.06, s * 0.06));
+                    below.Children.Add(new EllipseGeometry(new Point(s * 0.7, s * 0.74), s * 0.06, s * 0.06));
+                }
+                else if (code >= 95)                                                 // 雷雨：閃電穿過雲的下緣
+                    below.Children.Add(Geometry.Parse(string.Format(CultureInfo.InvariantCulture, "M{0},{1} L{2},{1} L{3},{4} L{5},{4} L{6},{7} L{8},{9} L{10},{9} Z",
+                        s * 0.62, s * 0.42, s * 0.45, s * 0.35, s * 0.72, s * 0.49, s * 0.41, s * 0.98, s * 0.69, s * 0.62, s * 0.54)));
+                g = below.Children.Count == 0 ? cloud : Union(Cut(cloud, below, gap), below);   // 陰天：只有雲
             }
+            var box = g.Bounds;
+            double k = Math.Min(maxH / box.Height, maxW / box.Width);
+            var t = new TransformGroup();
+            t.Children.Add(new TranslateTransform(-box.X, -box.Y));
+            t.Children.Add(new ScaleTransform(k, k));
+            var canvas = new Canvas { Width = box.Width * k, Height = box.Height * k };
+            canvas.Children.Add(new System.Windows.Shapes.Path { Data = g, Fill = Brushes.White, RenderTransform = t });
             return canvas;
         }
 
-        static void AddSun(Canvas c, double cx, double cy, double r, Color color)
+        // 太陽：圓心一個實心圓，外面八道圓頭的光芒；r 是光芒外緣的半徑
+        static Geometry SunShape(double cx, double cy, double r)
         {
-            var dot = new System.Windows.Shapes.Ellipse { Width = r * 2, Height = r * 2, Fill = new SolidColorBrush(color) };
-            dot.Effect = new System.Windows.Media.Effects.DropShadowEffect { Color = color, BlurRadius = r * 1.2, ShadowDepth = 0, Opacity = 0.55 };
-            Canvas.SetLeft(dot, cx - r); Canvas.SetTop(dot, cy - r);
-            c.Children.Add(dot);
-        }
-
-        static void AddMoon(Canvas c, double cx, double cy, double r, Color color)
-        {
-            var shape = new CombinedGeometry(GeometryCombineMode.Exclude,
-                new EllipseGeometry(new Point(cx, cy), r, r),
-                new EllipseGeometry(new Point(cx + r * 0.55, cy - r * 0.35), r * 0.8, r * 0.8));
-            c.Children.Add(new System.Windows.Shapes.Path { Data = shape, Fill = new SolidColorBrush(color) });
-        }
-
-        static void AddCloud(Canvas c, double x, double y, double w, Color color)
-        {
-            double h = w * 0.62;
-            var shape = new GeometryGroup { FillRule = FillRule.Nonzero };
-            shape.Children.Add(new RectangleGeometry(new Rect(x + w * 0.1, y + h * 0.5, w * 0.8, h * 0.42), h * 0.21, h * 0.21));
-            shape.Children.Add(new EllipseGeometry(new Point(x + w * 0.3, y + h * 0.62), w * 0.2, w * 0.2));
-            shape.Children.Add(new EllipseGeometry(new Point(x + w * 0.54, y + h * 0.45), w * 0.27, w * 0.27));
-            shape.Children.Add(new EllipseGeometry(new Point(x + w * 0.74, y + h * 0.66), w * 0.17, w * 0.17));
-            // 淡淡的深色邊，讓雲跟後面的太陽 / 月亮分得開
-            c.Children.Add(new System.Windows.Shapes.Path
+            var group = new GeometryGroup { FillRule = FillRule.Nonzero };
+            group.Children.Add(new EllipseGeometry(new Point(cx, cy), r * 0.46, r * 0.46));
+            double t = r * 0.16;
+            for (int i = 0; i < 8; i++)
             {
-                Data = shape.GetOutlinedPathGeometry(),   // 合成一個外框，邊線只畫在雲的外圍
-                Fill = new SolidColorBrush(color),
-                Stroke = new SolidColorBrush(Color.FromArgb(0x70, 0x20, 0x24, 0x2A)), StrokeThickness = Math.Max(1, w * 0.045),
-            });
+                var ray = new RectangleGeometry(new Rect(cx - t / 2, cy - r, t, r * 0.3), t / 2, t / 2);
+                ray.Transform = new RotateTransform(45 * i, cx, cy);
+                group.Children.Add(ray);
+            }
+            return group;
         }
 
-        static void AddBar(Canvas c, double x, double y, double w, double h, Color color)
+        // 新月：大圓扣掉往右上偏的圓
+        static Geometry Crescent(double cx, double cy, double r)
         {
-            var bar = new System.Windows.Shapes.Rectangle { Width = w, Height = h, RadiusX = Math.Min(w, h) / 2, RadiusY = Math.Min(w, h) / 2, Fill = new SolidColorBrush(color) };
-            Canvas.SetLeft(bar, x); Canvas.SetTop(bar, y);
-            c.Children.Add(bar);
+            return new CombinedGeometry(GeometryCombineMode.Exclude,
+                new EllipseGeometry(new Point(cx, cy), r, r),
+                new EllipseGeometry(new Point(cx + r * 0.58, cy - r * 0.38), r * 0.8, r * 0.8));
         }
 
-        static void AddDot(Canvas c, double cx, double cy, double r, Color color)
+        // 晴朗的夜晚：新月（偏左下）加右上兩顆四角星
+        static Geometry MoonStars(double cx, double cy, double r)
         {
-            var dot = new System.Windows.Shapes.Ellipse { Width = r * 2, Height = r * 2, Fill = new SolidColorBrush(color) };
-            Canvas.SetLeft(dot, cx - r); Canvas.SetTop(dot, cy - r);
-            c.Children.Add(dot);
+            var group = new GeometryGroup { FillRule = FillRule.Nonzero };
+            group.Children.Add(Crescent(cx - r * 0.12, cy + r * 0.1, r * 0.8));
+            group.Children.Add(Star(cx + r * 0.55, cy - r * 0.6, r * 0.3));
+            group.Children.Add(Star(cx + r * 0.82, cy - r * 0.08, r * 0.2));
+            return group;
+        }
+
+        // 四角星（四邊往裡彎）
+        static Geometry Star(double cx, double cy, double r)
+        {
+            return Geometry.Parse(string.Format(CultureInfo.InvariantCulture, "M{0},{1} Q{2},{1} {2},{3} Q{2},{1} {4},{1} Q{2},{1} {2},{5} Q{2},{1} {0},{1} Z",
+                cx - r, cy, cx, cy - r, cx + r, cy + r));
+        }
+
+        // 雲：三個圓疊在一條圓頭的底上，三個圓的底都剛好碰到底邊（底是平的）；從 (x, y) 開始、寬 w，高 0.6 w
+        static Geometry CloudShape(double x, double y, double w)
+        {
+            var shape = new GeometryGroup { FillRule = FillRule.Nonzero };
+            shape.Children.Add(new RectangleGeometry(new Rect(x + w * 0.02, y + w * 0.36, w * 0.96, w * 0.24), w * 0.12, w * 0.12));
+            shape.Children.Add(new EllipseGeometry(new Point(x + w * 0.27, y + w * 0.4), w * 0.2, w * 0.2));
+            shape.Children.Add(new EllipseGeometry(new Point(x + w * 0.53, y + w * 0.3), w * 0.28, w * 0.28));
+            shape.Children.Add(new EllipseGeometry(new Point(x + w * 0.78, y + w * 0.42), w * 0.18, w * 0.18));
+            return shape.GetOutlinedPathGeometry();
+        }
+
+        // 圓頭的長條（左上角 (x, y)、寬 w、高 h）
+        static Geometry Capsule(double x, double y, double w, double h)
+        {
+            double r = Math.Min(w, h) / 2;
+            return new RectangleGeometry(new Rect(x, y, w, h), r, r);
+        }
+
+        static Geometry Union(Geometry a, Geometry b) { return Geometry.Combine(a, b, GeometryCombineMode.Union, null); }
+
+        // a 扣掉 b（再往外多扣 gap，兩個形狀中間留一道細縫）
+        static Geometry Cut(Geometry a, Geometry b, double gap)
+        {
+            var grown = Geometry.Combine(b, b.GetWidenedPathGeometry(new Pen(Brushes.Black, gap * 2)), GeometryCombineMode.Union, null);
+            return Geometry.Combine(a, grown, GeometryCombineMode.Exclude, null);
         }
     }
 }

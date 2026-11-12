@@ -21,6 +21,25 @@ namespace VideoWallpaper
         static readonly FontFamily CardFont = new FontFamily(
             new Uri(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fonts") + "\\"), "./#Inter, Microsoft JhengHei UI, Segoe UI, Malgun Gothic");
 
+        // 時鐘可以換成自己電腦上的字型：fonts\local 資料夾（不進 repo）裡的 clock.ttf 給時間的大數字、date.ttf 給日期那一行，有就用、沒有就用 Inter。
+        // 給有授權限制、不能跟著程式散佈的字型用；字型檔要是已經定好粗細、寬度的一般字型（可變字型請先切出來），粗細照字型檔本身
+        static readonly FontFamily ClockFont = LocalFont("clock.ttf"), DateFont = LocalFont("date.ttf");
+        static readonly bool clockFontLocal = ClockFont != CardFont, dateFontLocal = DateFont != CardFont;
+        static FontFamily LocalFont(string file)
+        {
+            try
+            {
+                string dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fonts", "local");
+                string path = Path.Combine(dir, file);
+                if (File.Exists(path))
+                    foreach (var name in new GlyphTypeface(new Uri(path)).FamilyNames.Values)   // 這個檔案自己的字型名稱（Fonts.GetFontFamilies 會列出整個資料夾的）
+                        // 字型裡沒有的字（中文等）照 CardFont 的順序找
+                        return new FontFamily(new Uri(dir + "\\"), "./" + file + "#" + name + ", Microsoft JhengHei UI, Segoe UI, Malgun Gothic");
+            }
+            catch { }
+            return CardFont;
+        }
+
         // 圖的四周留給陰影的空間
         public static int ShadowPad(int screenHeight) { return (int)Math.Ceiling(30 * screenHeight / 1080.0); }
 
