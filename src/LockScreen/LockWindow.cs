@@ -12,6 +12,7 @@ namespace VideoWallpaper
         public Func<int, int, bool> Click;   // 回傳 true = 點到「正在播放」的按鈕，不要滑走
         public Action<int, int> Drag;        // 按著左鍵拖曳進度條（StartDrag 之後才會收到）
         public Action Drop;                  // 放開左鍵
+        public Func<bool> Press;             // 左鍵按在按鈕、卡片以外：回傳 true = 接手（可能要拖頁面，放開時沒拖動才算點一下）
         public Action LyricsKey;             // L：打開 / 關掉歌詞
         public System.Drawing.Rectangle Bounds { get; private set; }
         bool dragging;
@@ -110,9 +111,10 @@ namespace VideoWallpaper
                     if (key == 0x4C) { if ((m.LParam.ToInt64() & 0x40000000) == 0 && LyricsKey != null) LyricsKey(); return; }
                     if ((key == 0x20 || key == 0x0D || key == 0x1B) && Dismiss != null) Dismiss();
                     return;
-                case 0x0201:   // 滑鼠左鍵：點到卡片上的按鈕就控制播放器，其他地方就滑走
+                case 0x0201:   // 滑鼠左鍵：點到卡片上的按鈕就控制播放器；其他地方可以往上拖走頁面（Press），沒有接 Press 的話就滑走
                     long lp = m.LParam.ToInt64();
                     if (Click != null && Click((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF))) return;
+                    if (Press != null && Press()) return;
                     if (Dismiss != null) Dismiss();
                     return;
                 case 0x0204: case 0x0207:   // 滑鼠右鍵 / 中鍵

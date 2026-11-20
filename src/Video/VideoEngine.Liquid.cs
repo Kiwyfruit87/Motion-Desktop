@@ -44,34 +44,47 @@ namespace VideoWallpaper
         // 卡片跟著頁面滑動的慣性（每個鎖定視窗一份；換歌重畫卡片時接著動，不會從頭來）
         class CardMotion
         {
-            public double From, To, PageHeight;   // 頁面從哪裡滑到哪裡（0 = 蓋住畫面、1 = 在畫面上方）
-            public long Start;
-            public int Ms;
+            public PagePath Path;                  // 頁面怎麼滑（0 = 蓋住畫面、1 = 在畫面上方；拖曳中每次移動換一條）
+            public double PageHeight;
             public double D, DV;                  // 卡片相對頁面的位移（像素）和速度
             public readonly Spring Stretch = new Spring();   // 沿滑動方向拉長的程度
             public long LastTick;
             public double Scale = 1;
+            double TrackV;                         // 拖曳中這一格用的速度（像素 / 秒，見 Step）
+            double EvY, EvV; long EvT;             // 拖曳中最後一次滑鼠移動：頁面位置、去掉抖動的速度、時間（見 Feed）
 
-            // 頁面在 time 毫秒時往上的位移（像素，往上是負的）
-            public double PageY(double time)
+            // 拖曳中每次滑鼠移動（新的停住的 path）：照滑鼠事件本身的時間算速度——不用畫面一格一格去差，
+            // 滑鼠事件和畫面更新不同步，那樣有的格子剛好沒有新事件（速度 0）、有的有兩個（速度加倍），卡片會一直抖。
+            // 再用 1€ 濾波（像相機的防手震：慢的時候濾得重、把細碎的抖動吃掉；快的時候濾得輕、跟得上，不會慢半拍）
+            public void Feed(PagePath path)
             {
-                if (Ms <= 0) return 0;
-                double t = Math.Max(0, Math.Min(1, (time - Start) / Ms));
-                return -PageHeight * (From + (To - From) * Easing.StandardCurve(t));
+                double y = -PageHeight * path.To;   // 滑鼠的位置（頁面畫的時候是從上一次補過來的，見 PagePath.Hold）
+                bool first = Path == null || !Path.IsHold || path.Start - EvT > 200;
+                if (first) { EvY = y; EvT = path.Start; EvV = 0; return; }
+                long gap = path.Start - EvT;
+                if (gap <= 0) { EvY = y; return; }   // 同一毫秒裡的兩次移動：位置照新的，速度下次一起算
+                double dts = gap / 1000.0, raw = (y - EvY) / dts;
+                double cutoff = 3 + 0.006 * Math.Abs(EvV) / Scale;   // 1€：基本 3 Hz，每快 1000 像素 / 秒多 6 Hz
+                double tau = 1 / (2 * Math.PI * cutoff);
+                EvV += (raw - EvV) * dts / (dts + tau);
+                EvY = y; EvT = path.Start;
             }
 
-            public bool Sliding(long now) { return Ms > 0 && now - Start < Ms; }
+            // 頁面在 time 毫秒時往上的位移（像素，往上是負的）
+            public double PageY(double time) { return Path == null ? 0 : -PageHeight * Path.At(time); }
+
+            public bool Sliding(long now) { return Path != null && !Path.Done(now); }
 
             // 頁面往下蓋上來（打開鎖定畫面）
-            bool Down { get { return To < From; } }
+            bool Down { get { return Path != null && Path.To < Path.From; } }
 
-            // 頁面在 time 毫秒時的加速度（像素 / 秒²，用曲線本身的二階差分算），滑完就是 0。
+            // 頁面在 time 毫秒時的加速度（像素 / 秒²，用曲線本身的二階差分算），滑完就是 0（拖曳中頁面跟著滑鼠，也是 0）。
             // 收起時推力在滑到 35%～50% 時平順地放掉；打開時一路推到底（一般的彈跳）
             double PageAccel(double time)
             {
                 const double h = 4;
-                if (Ms <= 0 || time > Start + Ms + 2 * h) return 0;
-                double f = Down ? 0 : Math.Max(0, Math.Min(1, ((time - Start) / Ms - 0.35) / 0.15));
+                if (Path == null || Path.IsHold || Path.Done(time - 2 * h)) return 0;   // 拖曳中的速度變化另外算（見 Step；補位置的那段是分段直線，二階差分會在接點冒出假的推力）
+                double f = Down ? 0 : Math.Max(0, Math.Min(1, (Path.Progress(time) - 0.35) / 0.15));
                 return (PageY(time + h) - 2 * PageY(time) + PageY(time - h)) / (h * h) * 1e6 * (1 - f * f * (3 - 2 * f));
             }
 
@@ -86,9 +99,25 @@ namespace VideoWallpaper
                 double dt = LastTick == 0 ? 0 : Math.Min(0.1, (now - LastTick) / 1000.0);
                 LastTick = now;
                 if (dt <= 0) return Running(now);
-                const double h = 4;   // 毫秒：用曲線本身算速度（不受畫面更新時間不均勻影響）
-                double pv = Sliding(now) || Sliding(now - (long)(2 * h)) ? (PageY(now + h) - PageY(now - h)) / (2 * h) * 1000 : 0;
-                double w = 2 * Math.PI / 0.17, zeta = Down ? 0.5 : 0.3;
+                // 用曲線本身算速度（不受畫面更新時間不均勻影響）
+                double pv = Path == null ? 0 : -PageHeight * Path.Velocity(now);
+                bool hold = Path != null && Path.IsHold;
+                if (hold)
+                {
+                    // 拖曳中：速度用滑鼠事件算好的那個（見 Feed，已經去掉抖動）；滑鼠 20 毫秒沒動開始當作在停、50 毫秒就是停了（目標 0，
+                    // 平順地降，偶爾一次事件來得晚不會突然掉一下）。
+                    // 這一格的速度再平順地追上目標（15 毫秒），速度變了多少，卡片就反方向被推多少（急煞時往前衝一下再彈回，跟滑完停下一樣）
+                    double target = EvV * Math.Max(0, Math.Min(1, (50 - (now - EvT)) / 30.0));
+                    double nv = TrackV + (target - TrackV) * (1 - Math.Exp(-dt / 0.015));
+                    double cap = 1800 * Scale;   // 甩很快時推力不要無限大（彈性軟、同樣的推力會帶得比較遠，上限低一點：最多約 50 像素）
+                    DV -= cap * (Math.Tanh(nv / cap) - Math.Tanh(TrackV / cap));
+                    TrackV = nv;
+                    pv = nv;
+                }
+                else TrackV = 0;
+                // 用滑鼠拖（和放開後彈到定位）：軟一點的彈性（0.3 秒、阻尼比 0.7）——急煞時順勢往前帶一下、慢慢回來，不會像彈簧一樣彈好幾下
+                bool soft = Path != null && !Path.IsCurve;
+                double w = 2 * Math.PI / (soft ? 0.3 : 0.17), zeta = soft ? 0.7 : Down ? 0.5 : 0.3;
                 int n = Math.Max(1, (int)Math.Ceiling(dt * 240));
                 double step = dt / n, t0 = now - dt * 1000;
                 for (int i = 0; i < n; i++)   // 每一小步在那一小步的中間取頁面的加速度
@@ -97,11 +126,12 @@ namespace VideoWallpaper
                     DV += (-pa - w * w * D - 2 * zeta * w * DV) * step; D += DV * step;
                 }
                 double speed = Math.Abs(pv + DV);
-                Stretch.Step(0.06 * Math.Tanh(speed / (900 * Scale)), 0.5, 0.52, dt);
+                // 拖曳中拉長跟得緊一點（0.25 秒）：急煞時馬上縮回、稍微變扁再恢復，不會慢半拍
+                Stretch.Step(0.06 * Math.Tanh(speed / (900 * Scale)), hold ? 0.3 : 0.5, hold ? 0.75 : 0.52, dt);   // 拖曳中：跟得緊但不晃（阻尼比 0.75）
                 return Running(now);
             }
 
-            public bool Running(long now) { return Sliding(now) || Math.Abs(D) > 0.05 || Math.Abs(DV) > 0.5 || Stretch.Moving(0, 0.0002); }
+            public bool Running(long now) { return Sliding(now) || Math.Abs(TrackV) > 1 || Math.Abs(D) > 0.05 || Math.Abs(DV) > 0.5 || Stretch.Moving(0, 0.0002); }
 
             // 卡片的變形：以卡片中心為準，上下拉長 (1 + e)、左右收 1 / (1 + e)（面積不變），再往下移 D
             public void Transform(double cx, double cy, out double sx, out double sy, out double dx, out double dy)
@@ -303,14 +333,208 @@ namespace VideoWallpaper
             });
         }
 
-        // 鎖定畫面開始滑動（from → to，0 = 蓋住畫面、1 = 在上方；start 是 AnimationClock 的時間）：卡片照頁面的動作算慣性
-        public void SlideCard(IntPtr hwnd, double from, double to, int ms, long start, int pageHeight, double scale)
+        // 鎖定畫面滑進來、滑走（照 iPhone 從主畫面拉下鎖定畫面）：視窗不動，頁面在畫面裡移動。
+        // from → to（0 = 蓋住畫面、1 = 在上方），start 是 AnimationClock 的時間，曲線跟 LockScreen.Animate 一樣；
+        // snapshot 是滑動開始前底下桌面的快照（w × h 的 BGRA，跟這個畫面一樣大）。頁面下緣以下是快照、下緣是一條玻璃的邊；
+        // 頁面裡的背景一開始也是快照（透明的玻璃），打開時滑到 55%～95% 換成桌布、收起時一開始就換回快照。
+        // 準備不起來（顯示卡不支援、大小不合）就什麼都不做：呼叫的人要用 SheetCanSlide 先問，不行就照原本移動視窗
+        // 回傳的 SheetRequest：State 變成 1 表示準備好、已經畫出還沒開始滑的第一格（打開時就是桌面本身），UI 這時呼叫 SheetPath 才開始滑；
+        // 變成 2 表示準備不起來（顯示卡不支援、建不起來、大小不合），UI 要照原本移動整個視窗。等太久沒結果就 CancelSheet
+        public SheetRequest SlideSheet(IntPtr hwnd, int[] snapshot, int w, int h, double from, double to)
+        {
+            var request = new SheetRequest();
+            Post(delegate
+            {
+                var t = targets.Find(x => x.Hwnd == hwnd);
+                if (t == null || !t.CanOverlay) { request.State = 2; return; }
+                FreeSheet(t);
+                if (snapshot == null || w != t.Width || h != t.Height || !LiquidViews(t) || !liquid.SheetSupported) { request.State = 2; return; }
+                var s = new SheetSlide { From = from, To = to, Request = request };
+                IntPtr none;
+                if (!liquid.CreateCanvas(w, h, snapshot, false, out s.SnapTexture, out s.SnapView, out none)
+                    || !liquid.CreateCanvas(w, h, null, true, out s.SceneTexture, out s.SceneView, out s.SceneRtv)
+                    || !liquid.CreateCanvas(w, h, null, false, out s.FrameTexture, out s.FrameView, out none))
+                {
+                    s.Free();
+                    request.State = 2;
+                    return;
+                }
+                t.Sheet = s;
+                redraw = true;
+            });
+            return request;
+        }
+
+        // 準備好以後開始滑：照 path 走（照曲線滑；拖曳中每次滑鼠移動換一條停在新位置的；放開後換成彈簧）
+        public void SheetPath(IntPtr hwnd, PagePath path)
+        {
+            WithTarget(hwnd, delegate(Target t, long now) { if (t.Sheet != null) { t.Sheet.Path = path; redraw = true; } });
+        }
+
+        // UI 等太久沒結果：不滑了，收掉
+        public void CancelSheet(IntPtr hwnd)
+        {
+            WithTarget(hwnd, delegate(Target t, long now) { FreeSheet(t); });
+        }
+
+        // SlideSheet 的結果（UI 執行緒讀、引擎執行緒寫）：0 還在準備、1 好了、2 不行
+        public class SheetRequest { public volatile int State; }
+
+        // 這台電腦能不能用頁面在畫面裡移動的滑法（著色器編好了；顯示卡建不起來的話 SlideSheet 會什麼都不做）
+        public static bool SheetCanSlide { get { return LiquidGlass.SheetCompiled; } }
+
+        // 鎖定畫面滑進來、滑走的狀態（見 SlideSheet）
+        internal class SheetSlide
+        {
+            public double From, To;      // 打開（1 → 0）還是收起（0 → 1）
+            public PagePath Path;        // null：還沒開始（停在 from，等 UI 呼叫 SheetPath）
+            public SheetRequest Request; // 第一格畫好就告訴 UI
+            public const int CardIn = 280;   // 打開滑完以後卡片淡入多久（毫秒；這段時間頁面已經停好，合成的結果就是頁面本身）
+            // 頁面外露出的桌面（照 iPhone 的錄影量的）：頁面在畫面上時暗到 75%；打開時頁面一開始動就在 0.17 秒內暗下去，
+            // 收起滑完以後 0.3 秒亮回原樣（UI 等亮完才把視窗收掉，見 LockScreen.CloseAfterSlide）
+            public const double Dim = 0.75;
+            public const int DimIn = 170, DimOut = 300;
+            public long DoneAt;          // 收起：滑完的時間（亮回來從這時開始；0 = 還沒滑完）
+            public double DrawnAt;       // 這一格的頁面位置是照哪個時間算的（SheetEnd 照它判斷滑完了沒：畫的時候還差一點沒到，就要再畫一格）
+            public bool Opening { get { return To < From; } }
+            public IntPtr SnapTexture, SnapView, SceneTexture, SceneView, SceneRtv, FrameTexture, FrameView;
+            public IntPtr VideoScene;   // 這一格畫背景前的 LiquidScene（影片），畫完換回去
+            public bool Drawing;        // 這一格有沒有畫背景（SheetEnd 才要合成）
+            public float Oy, Fade, Edge;
+            public double U;            // 滑到哪（0～1）
+
+            public void Free()
+            {
+                LiquidGlass.Free(ref FrameView); LiquidGlass.Free(ref FrameTexture);
+                LiquidGlass.Free(ref SceneRtv); LiquidGlass.Free(ref SceneView); LiquidGlass.Free(ref SceneTexture);
+                LiquidGlass.Free(ref SnapView); LiquidGlass.Free(ref SnapTexture);
+            }
+        }
+
+        static void FreeSheet(Target t)
+        {
+            if (t.Sheet == null) return;
+            if (t.Sheet.Drawing) t.LiquidScene = t.Sheet.VideoScene;
+            t.Sheet.Free();
+            t.Sheet = null;
+        }
+
+        // 窗戶式（照 iPhone）：頁面裡的影片固定在畫面上不動、也不淡成桌面，頁面像一扇往上拉的窗，只有時鐘和卡片跟著頁面走。
+        // false：影片跟著頁面移動，收到一半前慢慢淡成底下的桌面（頁面最後看起來變透明）
+        const bool SheetWindow = false;
+
+        static double SheetSmooth(double a, double b, double x) { double t = Math.Max(0, Math.Min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); }
+
+        // 這一格的背景（影片和快照混好）畫進 SceneTexture、蓋到輸出畫面上，卡片和時鐘的玻璃這一格改折射它。沒在滑回傳 false（照平常蓋影片）
+        bool SheetBegin(Target t, long now)
+        {
+            var s = t.Sheet;
+            if (s == null) return false;
+            s.Drawing = false;
+            if (!LiquidViews(t)) return false;
+            var path = s.Path;
+            s.DrawnAt = AnimationClock.Precise;   // 帶小數的毫秒：高更新率的螢幕上每格移動的量才平均
+            double hidden = path == null ? s.From : path.At(s.DrawnAt);
+            if (path == null || path.IsCurve)
+            {
+                s.U = path == null ? 0 : path.Progress(now);
+                s.Edge = (float)(SheetSmooth(0, 0.08, s.U) * (1 - SheetSmooth(0.88, 1, s.U)));   // 玻璃的邊只在頁面移動時有（剛開始動、快停下時淡掉）
+                s.Fade = (float)(s.Opening ? SheetSmooth(0.55, 0.95, s.U) : 1 - SheetSmooth(0, 0.35, s.U));
+            }
+            else
+            {
+                // 用滑鼠拖（和放開後彈到定位）：跟著頁面的位置走，拖回原位就跟平常一模一樣（桌布全亮、沒有邊）
+                s.U = hidden;
+                s.Edge = (float)(SheetSmooth(0, 0.03, hidden) * (1 - SheetSmooth(0.97, 1, hidden)));
+                s.Fade = (float)(1 - SheetSmooth(0, 0.5, hidden));
+            }
+            if (SheetWindow) s.Fade = 1;   // 窗戶式：頁面裡一直是影片（不淡成桌面）
+            // 整數像素：頁面整張平移時不用雙線性重取樣（時鐘 1 像素的細輪廓、細高光才不會一格清楚、一格糊成兩條半亮的線，看起來一直在閃）
+            s.Oy = (float)Math.Round(-t.Height * hidden);
+            liquid.DrawSheet(false, t.LiquidScene, s.SnapView, s.SceneRtv, t.Width, t.Height, s.Oy, s.Fade, SheetWindow ? 1 : 0, 0, 0, 1);
+            copyResource(context, t.BackBuffer, s.SceneTexture);
+            s.VideoScene = t.LiquidScene;
+            t.LiquidScene = s.SceneView;
+            t.FreshVideo = true;   // 背景每一格都在變：玻璃要重新模糊
+            s.Drawing = true;
+            return true;
+        }
+
+        // 畫好的頁面整張移到現在的位置，下面露出快照、邊上一條玻璃，畫回輸出畫面。
+        // 打開滑完（頁面蓋滿、桌布全亮，跟平常一樣）就收掉；收起滑完留著（之後的每一格都是快照，直到視窗關掉）
+        void SheetEnd(Target t, long now)
+        {
+            var s = t.Sheet;
+            if (s == null || !s.Drawing) return;
+            t.LiquidScene = s.VideoScene;
+            s.Drawing = false;
+            copyResource(context, s.FrameTexture, t.BackBuffer);
+            double scale = t.Height / 1080.0;
+            var path = s.Path;
+            // 收起滑完（不是拖曳中停住的那種）：記下時間，桌面從這時亮回來
+            bool closed = path != null && !s.Opening && !path.IsHold && path.To >= 1 && path.Done(now);
+            if (closed && s.DoneAt == 0) s.DoneAt = now;
+            liquid.DrawSheet(true, s.FrameView, s.SnapView, t.LiquidRtv, t.Width, t.Height, s.Oy, s.Fade, (float)(42 * scale), (float)scale, s.Edge, (float)SheetDim(s, now));
+            if (s.Request != null && s.Request.State == 0) s.Request.State = 1;   // 第一格畫好了（這一格接著就 Present）
+            if (path == null) return;                                              // 還沒開始滑：等 UI（SheetPath 會再要求重畫）
+            if (s.Opening && now >= path.Start + path.Ms + SheetSlide.CardIn) FreeSheet(t);
+            else if (!path.Done(s.DrawnAt) || s.Opening || closed && now - s.DoneAt < SheetSlide.DimOut + 50) redraw = true;   // 拖曳中停住的那種不用一直畫（滑鼠一動 SheetPath 就會要求重畫）
+        }
+
+        // 頁面外露出的桌面現在多亮（見 SheetSlide.Dim）
+        static double SheetDim(SheetSlide s, long now)
+        {
+            var path = s.Path;
+            double dark = 1 - SheetSlide.Dim;
+            if (s.Opening) return path == null ? 1 : 1 - dark * SheetSmooth(0, 1, (now - path.Start) / (double)SheetSlide.DimIn);
+            if (s.DoneAt == 0) return SheetSlide.Dim;
+            return SheetSlide.Dim + dark * SheetSmooth(0, 1, (now - s.DoneAt) / (double)SheetSlide.DimOut);
+        }
+
+        // 卡片（玻璃、卡片上的圖、進度條和圓鈕）現在看得到多少：照 iPhone 從主畫面拉下鎖定畫面，滑下來時卡片先藏起來，
+        // 頁面停好以後約 0.28 秒淡入。收起（滑走、用滑鼠往上拖）時一邊跟著頁面滑一邊淡出（見 TopFade），拖回原位又淡回來
+        static double CardAlpha(Target t, long now)
+        {
+            var s = t.Sheet;
+            if (s == null) return 1;
+            if (!s.Opening)
+            {
+                var spec = t.Liquid != null ? t.Liquid.Spec : null;
+                return spec == null ? 1 : TopFade(t, spec.Y + spec.H / 2.0, now);
+            }
+            if (s.Path == null) return 0;
+            return SheetSmooth(0, 1, (now - s.Path.Start - s.Path.Ms) / (double)SheetSlide.CardIn);
+        }
+
+        // 收起（滑走、用滑鼠往上拖）時，頁面上的東西照自己現在的位置淡出：中心越靠近螢幕上緣越淡，到上緣就看不到。
+        // 從離上緣 35% 螢幕高（或原本的位置，比較近的那個）開始淡——上面的時鐘一動就開始淡、很快淡完，下面的卡片要滑到上半部才開始淡。
+        // center 是頁面停好時的中心 y（畫面座標）。打開、沒在滑時是 1
+        static double TopFade(Target t, double center, long now)
+        {
+            var s = t.Sheet;
+            if (s == null || s.Opening || s.Path == null) return 1;
+            double zone = Math.Min(center, 0.35 * t.Height);
+            if (zone < 1) return 1;
+            return SheetSmooth(0, zone, center - t.Height * s.Path.At(now));
+        }
+
+        // 時鐘現在看得到多少（見 TopFade）
+        static double ClockAlpha(Target t, long now)
+        {
+            return t.ClockH > 0 ? TopFade(t, t.ClockY + t.ClockH / 2.0, now) : 1;
+        }
+
+        // 鎖定畫面的頁面開始照 path 滑（0 = 蓋住畫面、1 = 在上方；拖曳中每次移動換一條）：卡片照頁面的動作算慣性
+        public void SlideCard(IntPtr hwnd, PagePath path, int pageHeight, double scale)
         {
             WithTarget(hwnd, delegate(Target t, long now)
             {
                 if (t.Motion == null) t.Motion = new CardMotion();
                 var m = t.Motion;
-                m.From = from; m.To = to; m.Ms = ms; m.Start = start; m.PageHeight = pageHeight; m.Scale = scale;
+                m.PageHeight = pageHeight; m.Scale = scale;
+                if (path.IsHold) m.Feed(path);   // 拖曳中：照滑鼠事件算速度（要在換掉 Path 之前，看上一條是不是也是拖曳中）
+                m.Path = path;
+                redraw = true;
                 if (m.LastTick == 0 || now - m.LastTick > 100) m.LastTick = now;   // 很久沒畫：從現在開始算
             });
         }
@@ -336,6 +560,7 @@ namespace VideoWallpaper
                     t.ClockSlots = slots; t.ClockAnimStart = now;
                     t.ClockTimeTop = timeTop; t.ClockDigitY = digitY; t.ClockDigitH = digitH; t.ClockDateY = dateY; t.ClockDateH = dateH;
                 }
+                t.ClockTimeTop = timeTop; t.ClockDigitY = digitY; t.ClockDigitH = digitH;   // 滑動時拉長也要用（沒有換分鐘的動畫時也記著）
                 FreeClockField(t);
                 t.ClockField = field;
                 t.ClockX = x; t.ClockY = y; t.ClockW = width; t.ClockH = height; t.ClockScale = scale;
@@ -382,11 +607,16 @@ namespace VideoWallpaper
             if (t.ClockFieldFailed) { FreeClockOld(t); return false; }   // 這張距離圖放不上顯示卡：等下一分鐘換圖再試，不要每一格都重試
             if (t.ClockView == IntPtr.Zero && !clockLiquid.CreateField(t.ClockField, t.ClockW, t.ClockH, out t.ClockTexture, out t.ClockView)) { t.ClockFieldFailed = true; FreeClockOld(t); return false; }
             bool animating = ClockAnim(t, now);
+            double warp = ClockWarp(t, now);
+            bool warpMoving = t.ClockWarpS.Moving(0, 0.05);   // 拉長還在彈回來：要再畫下一格
             double s = t.ClockScale;
             // 模糊的範圍：時鐘那張圖加上四周（邊緣往字裡面取樣最多 16；圖本身四周也留了 30）；要畫的範圍就是那張圖（四周已經留了影子的空間）
             int margin = (int)Math.Ceiling(56 * s);
+            // 下面固定多留拉長的最大量（ClockWarp 最多 45% 字高）：範圍不跟著拉長變，不然每變一點就要重建模糊用的貼圖（會掉格）
+            double rowH = t.ClockDigitY + 0.53 * t.ClockDigitH - t.ClockTimeTop;
+            int reserve = t.ClockDigitH > 0 && rowH > 0 ? (int)Math.Ceiling(0.45 * rowH) : 0;
             // 換分鐘的動畫中：新舊兩張圖的聯集（12:59 → 1:00 新的比較窄，舊的字在新圖外面還要畫）
-            int cx0 = t.ClockX, cy0 = t.ClockY, cx1 = t.ClockX + t.ClockW, cy1 = t.ClockY + t.ClockH;
+            int cx0 = t.ClockX, cy0 = t.ClockY, cx1 = t.ClockX + t.ClockW, cy1 = t.ClockY + t.ClockH + reserve;   // 拉長的字超出原本的圖
             if (animating)
             {
                 cx0 = Math.Min(cx0, t.ClockOldX); cy0 = Math.Min(cy0, t.ClockOldY);
@@ -395,13 +625,49 @@ namespace VideoWallpaper
             int bx, by, bw, bh, ex, ey, ew, eh;
             Clip(t, cx0 - margin, cy0 - margin, cx1 - cx0 + 2 * margin, cy1 - cy0 + 2 * margin, out bx, out by, out bw, out bh);
             Clip(t, cx0, cy0, cx1 - cx0, cy1 - cy0, out ex, out ey, out ew, out eh);
-            if (bw <= 0 || bh <= 0 || ew <= 0 || eh <= 0) return animating;
-            bool reblur = t.FreshVideo && now - t.ClockBlurredAt >= 33 || bx != t.ClockBlurX || by != t.ClockBlurY || bw != t.ClockBlurW || bh != t.ClockBlurH;
+            if (bw <= 0 || bh <= 0 || ew <= 0 || eh <= 0) return animating || warpMoving;
+            // 頁面在畫面裡滑的時候背景每一格都在變：每一格都重新模糊（四分之一大小，很便宜；不然字裡面約 30Hz 一頓一頓）
+            bool sliding = t.Sheet != null && t.Sheet.Drawing;
+            bool reblur = t.FreshVideo && (sliding || now - t.ClockBlurredAt >= 33) || bx != t.ClockBlurX || by != t.ClockBlurY || bw != t.ClockBlurW || bh != t.ClockBlurH;
             if (reblur) { t.ClockBlurredAt = now; t.ClockBlurX = bx; t.ClockBlurY = by; t.ClockBlurW = bw; t.ClockBlurH = bh; }
             clockLook.Scale = (float)s;
+            float[] anim = animating ? clockAnim : null;
+            if (warp > 0.01 && rowH > 0)   // 門檻很小（著色器自己有 1.0001 的門檻）：拉長是連續的，不會在 0 和半像素之間跳
+            {
+                if (!animating) Array.Clear(clockAnim, 0, clockAnim.Length);
+                clockAnim[WarpAt] = t.ClockTimeTop; clockAnim[WarpAt + 1] = (float)((rowH + warp) / rowH);
+                anim = clockAnim;
+            }
+            else if (animating) { clockAnim[WarpAt] = 0; clockAnim[WarpAt + 1] = 0; }
             t.ClockGlassOn = clockLiquid.DrawText(t.LiquidScene, t.Width, t.Height, t.LiquidRtv, t.ClockView, t.ClockX, t.ClockY, t.ClockW, t.ClockH,
-                animating ? t.ClockOldView : IntPtr.Zero, animating ? clockAnim : null, clockLook, bx, by, bw, bh, ex, ey, ew, eh, reblur);
-            return animating;
+                animating ? t.ClockOldView : IntPtr.Zero, anim, clockLook, bx, by, bw, bh, ex, ey, ew, eh, reblur, (float)ClockAlpha(t, now));
+            return animating || warpMoving;
+        }
+
+        const int WarpAt = (2 + 48) * 4;   // cbuffer ClockAnim 的 Warp
+
+        // 鎖定畫面滑進來、滑走時，時間那一行跟著慣性往下拉長多少像素（照 iPhone 從主畫面拉下鎖定畫面的錄影：
+        // 數字的上緣不動，滑動中拉長、停下的瞬間下緣再往下衝約三成字高，約 0.15 秒彈回）。
+        // 用卡片的慣性（CardMotion：頁面加速時落後、減速時衝過頭的彈簧）：往下衝過頭多少就拉長 2.8 倍那麼多，加上跟速度有關的拉長；最多 45% 字高
+        // 拉長量被放大好幾倍（2.8 倍 D、4 倍拉長 × 字高），卡片上看不出來的細碎抖動在時鐘上會很明顯：
+        // |D| 用平滑的絕對值（D 過零時不會折一下），再用臨界阻尼約 0.08 秒的彈簧把細碎的抖動吃掉（只影響拉長，不影響位置）
+        double ClockWarp(Target t, long now)
+        {
+            var m = t.Motion;
+            double rowH = t.ClockDigitY + 0.53 * t.ClockDigitH - t.ClockTimeTop, goal = 0;
+            if (m != null && t.ClockDigitH > 0 && rowH > 0)
+            {
+                // 只算卡片往下衝的那一邊（D > 0：頁面往下停住時下緣往下衝）。原本用 |D|：往下急拉時開始的落後（D < 0）和停住時的衝過頭
+                // 各拉長一次，時鐘會連續彈兩下。平滑的 max(0, D)：D 過零時不會折一下
+                double eps = 3 * t.ClockScale;
+                double ad = Math.Max(0, 0.5 * (Math.Sqrt(m.D * m.D + eps * eps) + m.D) - 0.5 * eps);
+                goal = Math.Min(0.45 * rowH, 2.8 * ad + 4.0 * Math.Max(0, m.Stretch.X) * rowH);
+            }
+            // 很久沒畫（上次打開鎖定畫面時留下的拉長量）：直接從現在的目標開始，打開時時鐘不會多拉長一下
+            if (t.ClockWarpAt == 0 || now - t.ClockWarpAt > 100) t.ClockWarpS.Jump(goal);
+            double dt = t.ClockWarpAt == 0 ? 0 : Math.Min(0.05, (now - t.ClockWarpAt) / 1000.0);
+            t.ClockWarpAt = now;
+            return Math.Max(0, t.ClockWarpS.Step(goal, 0.08, 1.0, dt));
         }
 
         // 換分鐘的動畫這一格的樣子，填進 clockAnim（排法見 LiquidGlass 的 cbuffer ClockAnim）。照 iPhone（iOS 26 玻璃時鐘）的錄影：
@@ -607,7 +873,7 @@ namespace VideoWallpaper
             var card = new LiquidGlass.Shape
             {
                 X = (float)cx, Y = (float)cy, HalfW = (float)(spec.W / 2 * (1 + wobble) + Math.Abs(bulge) / 2), HalfH = (float)((spec.H + ext) / 2), Radius = (float)spec.Radius,
-                Appear = 1, Thick = (float)Math.Max(0.6, Math.Min(1.5, Math.Min(spec.W, spec.H) / 2 / (cardLook.Bevel * s))),
+                Appear = (float)CardAlpha(t, now), Thick = (float)Math.Max(0.6, Math.Min(1.5, Math.Min(spec.W, spec.H) / 2 / (cardLook.Bevel * s))),
                 Mag = 1, Shadow = 0.11f, D00 = (float)(1 / sx), D11 = (float)(1 / sy),   // 不染色、不放大；很淡、很柔的影子（浮在桌布上，不是黑框）
                 Focus = 0.45f,   // 上下兩條直邊的折射只剩 55%（背景的字不會被拉長）；左右邊、圓角全強度
             };
@@ -620,7 +886,8 @@ namespace VideoWallpaper
             Clip(t, cx - hw - pad, cy - hh - pad, 2 * (hw + pad), 2 * (hh + pad), out ex, out ey, out ew, out eh);
             if (bw <= 0 || bh <= 0 || ew <= 0 || eh <= 0) return moving;
             // 影片沒換格、範圍也沒變：沿用上次的模糊（後面本來就糊掉了，一秒更新 30 次看起來跟 60 次一樣）
-            bool reblur = t.FreshVideo && now - t.LiquidBlurredAt >= 33 || bx != t.LiquidBlurX || by != t.LiquidBlurY || bw != t.LiquidBlurW || bh != t.LiquidBlurH;
+            bool reblur = t.FreshVideo && (t.Sheet != null && t.Sheet.Drawing || now - t.LiquidBlurredAt >= 33) ||   // 頁面在滑：每一格都重新模糊（同時鐘）
+ bx != t.LiquidBlurX || by != t.LiquidBlurY || bw != t.LiquidBlurW || bh != t.LiquidBlurH;
             if (reblur) { t.LiquidBlurredAt = now; t.LiquidBlurX = bx; t.LiquidBlurY = by; t.LiquidBlurW = bw; t.LiquidBlurH = bh; }
             liquidShapes[0] = card;
             cardLook.Scale = (float)s;
@@ -660,20 +927,21 @@ namespace VideoWallpaper
             if (c == null || c.Spec == null) return;
             var spec = c.Spec;
             double s = spec.Scale;
+            double cardAlpha = CardAlpha(t, AnimationClock.Now);   // 鎖定畫面滑下來時卡片先藏起來（見 CardAlpha）
             // 進度條：高 6（按住時 10，兩端也各往外長 ProgressGrow，兩邊的時間同時讓開）、軌道白 29%（按住 35%；播放器不接受跳轉、不能拖時 20%）、
             // 已播放白 86%（按住 100%）；不知道歌曲長度就不畫。ScrubAmount 衝過頭時大小跟著彈，亮度不用
             if (c.Progress >= 0)
             {
                 double sc = c.ScrubAmount, lit = Math.Max(0, Math.Min(1, sc)), ph = (6 + 4 * sc) * s, grow = spec.ProgressGrow * sc;
                 double px = spec.ProgressX0 - grow, plen = spec.ProgressX1 - spec.ProgressX0 + 2 * grow;
-                canvas.FillSolid(px, spec.ProgressY - ph / 2, plen, ph, ph / 2, 1, 1, 1, c.CanSeek ? 0.29 + 0.06 * lit : 0.2);
+                canvas.FillSolid(px, spec.ProgressY - ph / 2, plen, ph, ph / 2, 1, 1, 1, (c.CanSeek ? 0.29 + 0.06 * lit : 0.2) * cardAlpha);
                 double played = plen * c.Progress;
-                if (played > 0.5) canvas.FillSolid(px, spec.ProgressY - ph / 2, played, ph, ph / 2, 1, 1, 1, 0.86 + 0.14 * lit, px, plen);
+                if (played > 0.5) canvas.FillSolid(px, spec.ProgressY - ph / 2, played, ph, ph / 2, 1, 1, 1, (0.86 + 0.14 * lit) * cardAlpha, px, plen);
             }
             // 歌詞圓鈕的底：關著淡白 16.5%、開著白（236，淺色玻璃也不會被當成白字翻黑）；按下時跟玻璃一起放大
             double r = LyricsRadius(c), on = c.OnAmount, la = c.LyricsAlpha;
             double gray = 1 + (236 / 255.0 - 1) * on, alpha = (0.165 * la) * (1 - on) + 0.92 * on;
-            canvas.FillSolid(spec.LyricsX - r, spec.LyricsY - r, r * 2, r * 2, r, gray, gray, gray + (240 - 236) / 255.0 * on, alpha);
+            canvas.FillSolid(spec.LyricsX - r, spec.LyricsY - r, r * 2, r * 2, r, gray, gray, gray + (240 - 236) / 255.0 * on, alpha * cardAlpha);
         }
 
         // 歌詞圓鈕現在的半徑：按下時放大（小按鈕約 1.25 倍，跟原型一樣）
@@ -695,7 +963,7 @@ namespace VideoWallpaper
             var lyrics = new LiquidGlass.Shape
             {
                 X = (float)(spec.LyricsX * sx + dx), Y = (float)(spec.LyricsY * sy + dy), HalfW = (float)(r * sx), HalfH = (float)(r * sy), Radius = (float)(r * Math.Min(sx, sy)),
-                Appear = 1, Thick = 0.22f, Mag = 1, Energy = (float)Math.Min(1, c.Pressed), D00 = 1, D11 = 1,
+                Appear = (float)CardAlpha(t, AnimationClock.Now), Thick = 0.22f, Mag = 1, Energy = (float)Math.Min(1, c.Pressed), D00 = 1, D11 = 1,
             };
             liquidShapes[0] = lyrics;
             // 範圍：圓鈕加上影子（還有邊緣往外 50 取樣的環境反光）
@@ -709,6 +977,7 @@ namespace VideoWallpaper
 
         static void ReleaseLiquid(Target t)
         {
+            FreeSheet(t);
             FreeClockField(t);
             FreeClockOld(t);
             LiquidGlass.Free(ref t.LiquidRtv);

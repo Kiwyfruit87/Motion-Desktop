@@ -35,6 +35,8 @@ namespace VideoWallpaper
         static readonly List<Result> sheets = new List<Result>();   // 有長圖的歌（一張好幾 MB，只留最近畫的 3 首；同一首只會出現一次）
         static readonly object gate = new object();
 
+        static readonly Result NoLyrics = new Result();
+
         public static string SongKey(NowPlaying.Track track) { return track.Title + "\n" + track.Artist; }
 
         public static bool Has(Result r) { return r != null && r.Lines != null && r.Lines.Count > 0; }
@@ -44,6 +46,7 @@ namespace VideoWallpaper
         // 回傳 null 代表還在查；查完（有歌詞的話連長圖也畫好）會在 UI 執行緒呼叫 loaded
         public static Result Get(NowPlaying.Track track, int screenHeight, Action loaded)
         {
+            if (track.Ad) return NoLyrics;   // 廣告：不查（也不要把查不到記在廣告後那首歌上）
             string key = SongKey(track);
             Result cached;
             lock (gate)

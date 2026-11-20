@@ -474,6 +474,8 @@ namespace VideoWallpaper
                 if (o.Glass && t.LiquidActive) continue;   // 液態玻璃取代原本的毛玻璃（底和邊框都不畫）
                 if (o.ClockDigits && t.ClockGlassOn) continue;   // 玻璃數字取代實心數字
                 double fade = o.Fade.Value(now);
+                if (o.Z >= OverlayLayer.CardEdge || o.Glass) fade *= CardAlpha(t, now);   // 卡片的圖：滑下來時先藏起來
+                if (o.ClockDigits) fade *= ClockAlpha(t, now);                            // 時鐘的實心數字（畫不出玻璃時）：收起時跟玻璃數字一樣淡出
                 if (fade <= 0.004) continue;
                 Follow(t, canvas, o.Follow, ref follow);
                 if (o.Pulse) fade *= 0.7 * glow;   // 邊框的光暈：只在重拍時亮，最亮 70%（像呼吸，不是閃）

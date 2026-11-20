@@ -56,6 +56,8 @@ namespace VideoWallpaper
             // 畫在輸出畫面上用的繪圖目標和影片畫布的讀取介面、上次模糊的範圍和時間
             public LiquidCard Liquid;
             public CardMotion Motion;
+            public readonly Spring ClockWarpS = new Spring();   // 時鐘拉長的量（平滑過，見 ClockWarp）
+            public long ClockWarpAt;
             public bool LiquidActive;
             public IntPtr LiquidRtv, LiquidScene;
             public int LiquidBlurX, LiquidBlurY, LiquidBlurW, LiquidBlurH;
@@ -72,6 +74,8 @@ namespace VideoWallpaper
             public long ClockAnimStart;
             public float ClockTimeTop, ClockDigitY, ClockDigitH, ClockDateY, ClockDateH;
             public bool ClockGlassOn, ClockFieldFailed;
+            // 鎖定畫面滑進來、滑走時（見 VideoEngine.Liquid.cs 的 SlideSheet）：底下桌面的快照、這一格的背景、畫好的頁面
+            public SheetSlide Sheet;
             public int ClockBlurX, ClockBlurY, ClockBlurW, ClockBlurH;
             public long ClockBlurredAt = -100000;
 
@@ -284,7 +288,7 @@ namespace VideoWallpaper
                         if (reason != 0) { Lost(Lang.T("顯示卡裝置失效 0x", "Graphics device lost 0x") + reason.ToString("X8")); break; }
                     }
 
-                    if (playing && engine != null || engine == null && redraw)
+                    if (playing && engine != null || redraw)   // 有動畫要畫（影片暫停時也一樣）：跟著螢幕更新，每一格節奏一樣（不然滑鼠事件一來就畫，忽快忽慢）
                     {
                         // 跟著螢幕更新頻率走；拿不到螢幕（例如鎖定中）就退回用睡的。
                         // 圖片：只有在畫動畫（鎖定畫面滑動、歌詞、液態玻璃、進度條）時才跟著螢幕更新
@@ -538,7 +542,7 @@ namespace VideoWallpaper
             {
                 // 被視窗蓋住的螢幕就不畫，省資源（還沒畫過的除外：等第一格解碼好，先畫一格上去）
                 if (!t.Visible && (t.Presented || !frameReady)) continue;
-                if (!all && t.OverlayCount == 0 && t.Presented) continue;   // 只是疊圖在動：沒有疊圖的畫面不用重畫
+                if (!all && t.OverlayCount == 0 && t.Presented && t.Sheet == null) continue;   // 只是疊圖在動：沒有疊圖的畫面不用重畫
                 if (t.Visible) anyVisible = true;
                 MFVideoNormalizedRect src;
                 D3DRect dst;
@@ -558,7 +562,8 @@ namespace VideoWallpaper
                     continue;
                 }
                 transferFailures = 0;
-                if (t.VideoTexture != IntPtr.Zero) copyResource(context, t.BackBuffer, t.VideoTexture);   // 乾淨的影片整張蓋上去，再貼疊圖
+                // 乾淨的影片整張蓋上去，再貼疊圖。鎖定畫面滑動中：影片和底下桌面的快照混成這一格的背景（卡片、時鐘的玻璃也折射它）
+                if (t.VideoTexture != IntPtr.Zero && !SheetBegin(t, AnimationClock.Now)) copyResource(context, t.BackBuffer, t.VideoTexture);
                 if (t.Liquid != null || t.Motion != null)
                 {
                     if (DrawLiquidBase(t, AnimationClock.Now)) redraw = true;   // 卡片的液態玻璃（在影片上、疊圖底下）；卡片還在動就再畫下一格
@@ -566,6 +571,7 @@ namespace VideoWallpaper
                 else t.LiquidActive = false;
                 if (DrawClockGlass(t, AnimationClock.Now)) redraw = true;   // 時鐘的玻璃數字（也在疊圖底下）；換分鐘的動畫中就再畫下一格
                 if (DrawOverlay(t)) redraw = true;   // 歌詞捲動、淡入淡出中：下一次螢幕更新再畫一次
+                SheetEnd(t, AnimationClock.Now);      // 滑動中：畫好的頁面整張移到現在的位置，下面露出快照，邊上一條玻璃
                 hr = t.SwapChain.Present(0, 0);
                 if (hr < 0) { Lost(Lang.T("輸出畫面失敗 0x", "Presenting the frame failed 0x") + hr.ToString("X8")); return; }
                 if (hr == 0) t.Presented = true;   // DXGI_STATUS_OCCLUDED（例如鎖定中）時其實沒畫上去，不算

@@ -26,6 +26,7 @@ namespace VideoWallpaper
             public bool CanSeek = true;           // 播放器接受跳到別的位置嗎（不接受的話進度條不能拖）
             public bool CanPrev = true, CanNext = true;   // 播放器現在能不能跳上一首 / 下一首（不能的話卡片上的鍵很淡）
             public DateTime Updated;              // 回報位置的時間（UTC）
+            public bool Ad;                       // Spotify 免費版正在播廣告（不查歌詞、進度條不能拖）
         }
 
         // 推算現在播到第幾秒：Spotify 只在播放、暫停、跳轉時回報位置，播放中就從回報的時間往後推
@@ -99,6 +100,17 @@ namespace VideoWallpaper
             realArtist = window.Substring(0, dash);
             realTitle = window.Substring(dash + 3);
             return true;
+        }
+
+        static bool SpotifyAd(string app, object info)
+        {
+            if ((app ?? "").IndexOf("spotify", StringComparison.OrdinalIgnoreCase) < 0) return false;
+            try
+            {
+                object controls = Get(info, infoType, "Controls");
+                return !(bool)Get(controls, controlsType, "IsPreviousEnabled") && !(bool)Get(controls, controlsType, "IsNextEnabled");
+            }
+            catch { return false; }
         }
 
         class Candidate { public object Session; public string App; public int Kind, Score; }
@@ -286,8 +298,11 @@ namespace VideoWallpaper
                     object info = Call(found, sessionType, "GetPlaybackInfo", out rt);
                     string title = Get(props, propsType, "Title") as string, artist = Get(props, propsType, "Artist") as string ?? "";
                     string album = Get(props, propsType, "AlbumTitle") as string ?? "";
+                    // Spotify 免費版播廣告：上一首、下一首都不能按（平常播歌時 Spotify 一定開著）。
+                    // 封面、標題照 Spotify 給的（通常是廣告自己的；歌播到一半按下一首插進來的廣告，給的卻是廣告後那首歌）
+                    bool ad = !string.IsNullOrEmpty(title) && SpotifyAd(foundApp, info);
                     // Spotify 給 Windows 的還是上一首：歌名、歌手照它的視窗標題，專輯和封面是舊的就不用
-                    bool stale = !string.IsNullOrEmpty(title) && StaleSpotify(foundApp, title, artist, out title, out artist);
+                    bool stale = !ad && !string.IsNullOrEmpty(title) && StaleSpotify(foundApp, title, artist, out title, out artist);
                     if (stale) album = "";
                     if (!string.IsNullOrEmpty(title))
                     {
@@ -333,10 +348,11 @@ namespace VideoWallpaper
                             }
                         }
                         catch { }
+                        if (ad) canSeek = false;   // 廣告不能跳
                         track = new Track
                         {
                             Title = title, Artist = artist, Album = album, Playing = playing, Art = artCache,
-                            App = foundApp,
+                            App = foundApp, Ad = ad,
                             Shuffle = shuffle, Repeat = repeat, CanSeek = canSeek, CanPrev = canPrev, CanNext = canNext,
                             Key = songKey + "\n" + playing + "\n" + shuffle + "\n" + repeat + "\n" + (artCache == null ? 0 : artCache.Length) + "\n" + foundApp
                                 + "\n" + canSeek + canPrev + canNext,

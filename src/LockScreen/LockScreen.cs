@@ -107,8 +107,12 @@ namespace VideoWallpaper
             {
                 if (touching && engine != null) engine.TouchLiquid(primary.Handle, x, y, true);   // 白光跟著手指（顯示卡重設的空檔沒有引擎）
                 if (progress.Scrubbing) progress.OnDrag(x);
+                if (pageDrag != null) PageMove();
             };
-            primary.Drop = delegate { progress.OnDrop(); Release(); };
+            primary.Drop = delegate { progress.OnDrop(); Release(); if (pageDrag != null) PageDrop(false); };
+            primary.Press = OnPress;
+            pageWatch = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+            pageWatch.Tick += delegate { if (pageDrag == null) pageWatch.Stop(); else if (!LockWindow.LeftButtonDown()) PageDrop(true); };
             LockWindow.ResetCursor();
             progress.Start();
             pressWatch = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
@@ -146,7 +150,9 @@ namespace VideoWallpaper
             {
                 if (!Active || opening != openCount) return;   // 這 150 毫秒內被關掉又重開過：交給新的那次
                 foreach (var w in windows) w.PaintBlack = false;
-                Animate(1, 0, 500, delegate
+                // 主螢幕照 iPhone 從主畫面拉下鎖定畫面：視窗不動，頁面在畫面裡滑下來（見 VideoEngine.SlideSheet）。
+                // 鎖定畫面這時還在螢幕上方，直接拍就是底下的桌面
+                Slide(1, 0, 500, false, delegate
                 {
                     if (!Active) return;
                     Native.SetForegroundWindow(primary.Handle);   // 讓鍵盤輸入進到鎖定畫面
@@ -160,6 +166,7 @@ namespace VideoWallpaper
         public void Attach(VideoEngine videoEngine)
         {
             engine = videoEngine;
+            if (pageDrag != null) pageDrag.Pinned = null;   // 拖著頁面時換了引擎：新引擎上沒有在畫面裡滑的頁面，剩下的改成移動整個視窗
             if (engine == null) return;
             engine.PulseLevel = beatGlow ? Beat.Glow : (Func<long, double>)null;   // 卡片邊框的光暈跟著抓到的重拍亮
             foreach (var w in windows) engine.AddTarget(w.Handle, w.Bounds.Width, w.Bounds.Height, w == primary);
@@ -490,6 +497,12 @@ namespace VideoWallpaper
         // 點到「正在播放」的按鈕：控制播放器、切換歌詞或拖進度條，鎖定畫面不滑走（變暗的按鈕按了也不會滑走）
         bool OnClick(int x, int y)
         {
+            // 上一次按下的放開沒收到（還沒被 pageWatch 清掉）：已經在拖的照放開處理（滑走或彈回），這一下不算；還沒拖動的直接丟掉
+            if (pageDrag != null)
+            {
+                if (pageDrag.Moving) { PageDrop(true); return true; }
+                EndPageDrag();
+            }
             if (busy) return false;
             if (engine == null) return true;   // 顯示卡重設的空檔（還沒接上新的引擎）：點了不理，也不滑走
             foreach (var b in buttons)
@@ -531,12 +544,246 @@ namespace VideoWallpaper
         void OnDismiss()
         {
             if (!Active || busy) return;
+            EndPageDrag();   // 按著還沒拖動時按了空白鍵之類的：不用等放開
             bool blocked = false;
             BeforeDismiss(ref blocked);
             if (blocked) return;
             busy = true;
             SetCovering(false);             // 桌面要露出來了，桌面上的影片先接著畫
-            Animate(0, 1, 420, CloseNow);   // 往上滑走，滑完再收起來
+            Slide(0, 1, 420, true, CloseAfterSlide);   // 往上滑走，滑完再收起來
+        }
+
+        // 照曲線從 from 滑到 to（0 = 蓋住畫面、1 = 在上方），滑完呼叫 done（參數是在畫面裡滑的那個視窗，見 PrepareSheet；沒有是 null）
+        void Slide(double from, double to, int ms, bool hideSelf, Action<LockWindow> done)
+        {
+            var pinned = PrepareSheet(from, to, hideSelf);
+            // 頁面在畫面裡滑的話，下一次畫面更新才開始（跟視窗移到原位同一格）
+            var path = PagePath.Curve(from, to, AnimationClock.Now + (pinned != null ? 17 : 0), ms);
+            if (pinned != null) engine.SheetPath(primary.Handle, path);
+            Animate(path, pinned, delegate { done(pinned); });
+        }
+
+        // 收起滑完：頁面在畫面裡滑的話，露出來的桌面（快照）還暗著，等引擎把它亮回原樣（約 0.3 秒，照 iPhone）再收掉視窗，
+        // 收掉時看到的真正桌面才跟快照一樣亮、不會突然一亮。視窗本身滑走的（沒有快照）直接收
+        void CloseAfterSlide(LockWindow pinned)
+        {
+            if (pinned == null || !Active) { CloseNow(); return; }
+            var shown = primary;
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(VideoEngine.SheetSlide.DimOut + 40) };
+            timer.Tick += delegate
+            {
+                timer.Stop();
+                if (Active && primary == shown) CloseNow();   // 這段時間裡被 Win+L 收掉、又重新打開的話不要動到新的
+            };
+            timer.Start();
+        }
+
+        // ---------- 用滑鼠把頁面往上拖 ----------
+        // 按在按鈕、卡片以外的地方往上拖：頁面跟著游標走；放開時照位置和速度決定滑走還是彈回來（往上甩一下也會走）。
+        // 按了沒拖動就放開，跟以前一樣點一下就滑走
+        class PageDrag
+        {
+            public int PressY;            // 按下去的地方（螢幕座標）
+            public bool Moving;           // 已經往上拖超過一點點，頁面開始跟著走
+            public int OriginY;           // 開始跟著走的地方（頁面位置從這裡算，開始時不會跳一下）
+            public int LastY;             // 最後一次移動時游標在哪（頁面停在這裡；放開時從這裡彈）
+            public LockWindow Pinned;     // 主螢幕的頁面在畫面裡滑（不是 null 時這個視窗不動）
+            public PagePath Path;         // 最後一次移動時給的位置（從上一次畫到的地方補過去，見 PagePath.Hold）
+            public double Interval;       // 滑鼠事件平均隔多久（毫秒）
+            public readonly List<KeyValuePair<long, double>> Samples = new List<KeyValuePair<long, double>>();   // 最近的位置（算放開時的速度）
+        }
+        PageDrag pageDrag;
+        DispatcherTimer pageWatch;   // 拖曳中每 0.05 秒看左鍵還有沒有按著（放開的訊息被別的視窗收走時）
+        const int PageDragStart = 8; // 往上拖幾像素才算開始拖
+
+        bool OnPress()
+        {
+            if (!Active || busy || primary == null) return false;   // 正在滑：照舊（OnDismiss 會不理它）
+            Native.POINT p;
+            if (!Native.GetCursorPos(out p)) return false;
+            pageDrag = new PageDrag { PressY = p.Y };
+            primary.StartDrag();
+            pageWatch.Start();
+            return true;
+        }
+
+        // 游標現在在哪（螢幕座標；頁面沒辦法在畫面裡滑時視窗自己也在動，所以不用視窗裡的座標）
+        static int CursorY()
+        {
+            Native.POINT p;
+            Native.GetCursorPos(out p);
+            return p.Y;
+        }
+
+        void PageMove()
+        {
+            var d = pageDrag;
+            if (d == null) return;
+            if (!Active || primary == null) { EndPageDrag(); return; }
+            if (!LockWindow.LeftButtonDown()) { PageDrop(true); return; }
+            int y = CursorY();
+            if (!d.Moving)
+            {
+                if (d.PressY - y < PageDragStart) return;   // 還沒往上拖動（往下拖不算）：放開時當作點一下
+                bool blocked = false;
+                BeforeDismiss(ref blocked);
+                if (blocked || busy) { EndPageDrag(); return; }
+                busy = true;
+                SetCovering(false);   // 桌面要露出來了，桌面上的影片先接著畫
+                d.Moving = true;
+                d.OriginY = y;
+                d.Pinned = PrepareSheet(0, 1, true);
+                if (!Active || pageDrag != d) return;   // 準備的途中被收掉了
+                y = CursorY();
+            }
+            d.LastY = y;
+            long now = AnimationClock.Now;
+            double at = DragHidden(d, y), v = DragVelocity(d, y, now);
+            // 從現在畫到的位置，用大約一個滑鼠事件間隔（平均過的，2～12 毫秒）等速補到這次的位置（見 PagePath.Hold）
+            var prev = d.Path;
+            long gap = prev == null ? 0 : now - prev.Start;
+            if (gap > 0 && gap < 40) d.Interval = d.Interval <= 0 ? gap : d.Interval + (gap - d.Interval) * 0.25;
+            int ms = prev == null ? 0 : (int)Math.Round(Math.Max(2, Math.Min(12, d.Interval <= 0 ? 8 : d.Interval)));
+            d.Path = PagePath.Hold(prev == null ? at : prev.At(now), at, v, now, ms);
+            ShowPage(d, d.Path);
+        }
+
+        // 頁面現在被拖到哪（0 = 蓋住畫面、1 = 在上方），順便記下來算速度
+        double DragHidden(PageDrag d, int y)
+        {
+            return Math.Max(0, Math.Min(1, (d.OriginY - y) / (double)primary.Bounds.Height));
+        }
+
+        // 到 now 為止最近 0.08 秒的平均速度（每秒幾個畫面高，往上是正的；y 是 now 時游標的位置，記下來）
+        double DragVelocity(PageDrag d, int y, long now)
+        {
+            d.Samples.Add(new KeyValuePair<long, double>(now, DragHidden(d, y)));
+            while (d.Samples.Count > 2 && now - d.Samples[0].Key > 80) d.Samples.RemoveAt(0);
+            var first = d.Samples[0];
+            long dt = now - first.Key;
+            return dt < 8 ? 0 : (DragHidden(d, y) - first.Value) / (dt / 1000.0);
+        }
+
+        // 頁面照 path 走：主螢幕的頁面（或整個視窗）、其他螢幕的視窗、卡片的慣性一起
+        void ShowPage(PageDrag d, PagePath path)
+        {
+            if (engine != null && primary != null)
+            {
+                if (d.Pinned != null) engine.SheetPath(primary.Handle, path);
+                engine.SlideCard(primary.Handle, path, primary.Bounds.Height, primary.Bounds.Height / 1080.0);
+            }
+            Move(path.To, d.Pinned);   // 其他螢幕的視窗直接到滑鼠的位置（每次移動才動一次，補不了）
+        }
+
+        // late：放開的訊息沒收到，是事後才發現的（最多晚 0.05 秒）
+        void PageDrop(bool late)
+        {
+            var d = pageDrag;
+            EndPageDrag();
+            if (d == null || !Active || primary == null) return;
+            if (!d.Moving) { OnDismiss(); return; }   // 沒拖動：點一下，跟以前一樣滑走
+            // 從頁面現在畫的位置（最後一次移動）彈，不用放開時的游標（事後才發現放開時游標可能已經移走了，頁面會先跳一下）。
+            // 速度：收到放開的訊息時再記一筆現在的時間（放開前停了一下的話，舊的移動就不算）；
+            // 事後才發現的，照最後一次移動的時間算（不然這段晚發現的時間會被當成停住，往上甩一下也被算成彈回）
+            int y = d.LastY;
+            long at = late && d.Samples.Count > 0 ? d.Samples[d.Samples.Count - 1].Key : AnimationClock.Now;
+            double raw = DragHidden(d, y), v = Math.Max(-6, Math.Min(6, DragVelocity(d, y, at)));
+            // 照現在的速度再滑一小段（0.25 秒）會超過一半就滑走，不然彈回來：慢慢拖過一半、或往上甩一下都會走（照游標判斷）
+            bool away = raw + 0.25 * v > 0.5;
+            // 彈簧從現在畫到的位置開始（還在補最後那一段的話，從補到的地方接著走，不會跳一下）
+            long now = AnimationClock.Now;
+            double h = d.Path != null ? d.Path.At(now) : raw;
+            var path = PagePath.Spring(h, v, away ? 1 : 0, now);
+            if (engine != null && d.Pinned != null) engine.SheetPath(primary.Handle, path);
+            Animate(path, d.Pinned, delegate
+            {
+                if (away) { CloseAfterSlide(d.Pinned); return; }
+                if (!Active) return;
+                if (engine != null && d.Pinned != null) engine.CancelSheet(primary.Handle);   // 回到原位：跟平常一模一樣，收掉
+                busy = false;
+                SetCovering(true);
+                Native.SetForegroundWindow(primary.Handle);
+            });
+        }
+
+        void EndPageDrag()
+        {
+            if (pageDrag == null) return;
+            pageDrag = null;
+            if (pageWatch != null) pageWatch.Stop();
+            if (primary != null) primary.EndDrag();
+        }
+
+        // 主螢幕的頁面在畫面裡滑（視窗不動）：拍底下桌面的快照交給引擎，等引擎準備好，回傳不用移動的那個視窗；
+        // 之後由呼叫的人用 VideoEngine.SheetPath 告訴引擎頁面怎麼走。拍不到、這台電腦不支援就回傳 null，照原本移動整個視窗。
+        // hideSelf：鎖定畫面正蓋著（收起時）——只在拍的那一兩格把視窗排除在截圖之外（其他時候照樣截得到），拍完馬上恢復
+        LockWindow PrepareSheet(double from, double to, bool hideSelf)
+        {
+            if (engine == null || primary == null || !VideoEngine.SheetCanSlide) return null;
+            int[] snapshot = SnapScreen(primary, hideSelf, windows);
+            if (snapshot == null) return null;
+            // 等引擎把快照放上顯示卡、畫出還沒開始滑的第一格（打開時那一格就是桌面本身，視窗這時才移下來，看不出接縫）；
+            // 準備不起來、或等超過 0.3 秒，就照原本移動整個視窗
+            var request = engine.SlideSheet(primary.Handle, snapshot, primary.Bounds.Width, primary.Bounds.Height, from, to);
+            long giveUp = AnimationClock.Now + 300;
+            using (var vblank = new VBlank())
+                while (request.State == 0 && AnimationClock.Now < giveUp) vblank.Wait();
+            if (engine == null || primary == null) return null;
+            if (request.State != 1) { engine.CancelSheet(primary.Handle); return null; }
+            return primary;
+        }
+
+        // 拍 w 那個螢幕現在的樣子（BGRA，跟螢幕一樣大）；失敗回傳 null
+        // 其他螢幕的鎖定視窗（all 裡不是 w 的）也一起排除：打開時它們停在自己螢幕的正上方，主螢幕在下面的話會蓋在主螢幕上
+        static int[] SnapScreen(LockWindow w, bool hideSelf, List<LockWindow> all)
+        {
+            var b = w.Bounds;
+            var hidden = new List<LockWindow>();
+            try
+            {
+                if (hideSelf)
+                {
+                    if (!Native.SetWindowDisplayAffinity(w.Handle, 0x11 /* WDA_EXCLUDEFROMCAPTURE */)) return null;
+                    hidden.Add(w);
+                }
+                foreach (var o in all)
+                    if (o != w && Native.SetWindowDisplayAffinity(o.Handle, 0x11)) hidden.Add(o);
+                if (hidden.Count > 0) { Native.DwmFlush(); Native.DwmFlush(); }   // 等 DWM 換成不含鎖定畫面的那一份
+                try
+                {
+                    using (var bmp = new System.Drawing.Bitmap(b.Width, b.Height, System.Drawing.Imaging.PixelFormat.Format32bppRgb))
+                    {
+                        // 直接 BitBlt（Graphics.CopyFromScreen 不接受 SRCCOPY 加 CAPTUREBLT 的組合）：CAPTUREBLT 讓分層視窗（選單、提示）也拍進來
+                        using (var g = System.Drawing.Graphics.FromImage(bmp))
+                        {
+                            IntPtr dst = g.GetHdc(), src = Native.GetDC(IntPtr.Zero);
+                            try
+                            {
+                                if (src == IntPtr.Zero || !Native.BitBlt(dst, 0, 0, b.Width, b.Height, src, b.X, b.Y, 0x00CC0020 /* SRCCOPY */ | 0x40000000 /* CAPTUREBLT */)) return null;
+                            }
+                            finally
+                            {
+                                if (src != IntPtr.Zero) Native.ReleaseDC(IntPtr.Zero, src);
+                                g.ReleaseHdc(dst);
+                            }
+                        }
+                        var data = bmp.LockBits(new System.Drawing.Rectangle(0, 0, b.Width, b.Height), System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                            System.Drawing.Imaging.PixelFormat.Format32bppRgb);
+                        var pixels = new int[b.Width * b.Height];
+                        for (int y = 0; y < b.Height; y++)
+                            System.Runtime.InteropServices.Marshal.Copy(data.Scan0 + y * data.Stride, pixels, y * b.Width, b.Width);
+                        bmp.UnlockBits(data);
+                        return pixels;   // 著色器只用 rgb，alpha 不用管
+                    }
+                }
+                finally
+                {
+                    // 一定要恢復（不然之後截圖、錄影都拍不到鎖定畫面）：失敗再試一次
+                    foreach (var o in hidden)
+                        if (!Native.SetWindowDisplayAffinity(o.Handle, 0)) Native.SetWindowDisplayAffinity(o.Handle, 0);
+                }
+            }
+            catch { return null; }
         }
 
         // 其他檔案可以決定要不要滑走、切走時怎麼處理（沒有實作就照平常）
@@ -594,6 +841,7 @@ namespace VideoWallpaper
             pressed = -1;
             lyricsArmed = false;   // 按著歌詞圓鈕時被收掉：不打開歌詞
             if (pressWatch != null) pressWatch.Stop();
+            EndPageDrag();         // 拖著頁面時被收掉（Win+L、睡眠）
             progress.Stop();
             card = null;
             colorShown = false;
@@ -629,32 +877,34 @@ namespace VideoWallpaper
         }
 
         // 移動所有鎖定視窗：hidden = 0 完全蓋住螢幕，1 完全在螢幕上方
-        void Move(double hidden)
+        void Move(double hidden, LockWindow pinned = null)
         {
             IntPtr batch = Native.BeginDeferWindowPos(windows.Count);
             foreach (var w in windows)
-                batch = Native.DeferWindowPos(batch, w.Handle, IntPtr.Zero, w.Bounds.X, w.Bounds.Y - (int)Math.Round(w.Bounds.Height * hidden), 0, 0,
+                batch = Native.DeferWindowPos(batch, w.Handle, IntPtr.Zero, w.Bounds.X, w.Bounds.Y - (w == pinned ? 0 : (int)Math.Round(w.Bounds.Height * hidden)), 0, 0,
                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             Native.EndDeferWindowPos(batch);
         }
 
         // 每次螢幕垂直同步就移動一次視窗（120Hz 螢幕每秒 120 次），不會被影片的更新頻率綁住。
         // 視窗屬於這條執行緒，要在這裡移動才會立刻生效（從別的執行緒移動，Windows 會排隊交給這條執行緒，反而變慢）。
-        void Animate(double from, double to, int ms, Action done)
+        // pinned 不是 null：那個視窗不動（頁面由引擎在畫面裡滑，見 PrepareSheet）；其他螢幕照原本移動視窗。從 path.Start 才開始滑
+        void Animate(PagePath path, LockWindow pinned, Action done)
         {
-            // 卡片跟著頁面一起動，但有一點慣性（開始時慢半拍、停下時往前衝一點再彈回、移動時沿方向拉長一點），由播放引擎照同一條曲線算
-            if (engine != null && primary != null)
-                engine.SlideCard(primary.Handle, from, to, ms, AnimationClock.Now, primary.Bounds.Height, primary.Bounds.Height / 1080.0);
             using (var vblank = new VBlank())
             {
-                var clock = System.Diagnostics.Stopwatch.StartNew();
+                while (AnimationClock.Now < path.Start) vblank.Wait();   // 等引擎先畫好第一格
+                // 卡片跟著頁面一起動，但有一點慣性（開始時慢半拍、停下時往前衝一點再彈回、移動時沿方向拉長一點），由播放引擎照同一條曲線算
+                if (engine != null && primary != null)
+                    engine.SlideCard(primary.Handle, path, primary.Bounds.Height, primary.Bounds.Height / 1080.0);
                 while (true)
                 {
-                    double t = Math.Min(1.0, clock.Elapsed.TotalMilliseconds / ms);
-                    Move(from + (to - from) * Easing.StandardCurve(t));
-                    if (t >= 1) break;
+                    long now = AnimationClock.Now;
+                    Move(path.At(now), pinned);
+                    if (path.Done(now)) break;
                     vblank.Wait();
                 }
+                Move(path.To, pinned);   // 彈簧在離終點不到一像素時就算停好：最後放到剛好的位置（不然 4K 上可能差 1 像素、露出一條桌面）
             }
             done();
         }
