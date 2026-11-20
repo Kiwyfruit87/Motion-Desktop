@@ -9,6 +9,9 @@ namespace VideoWallpaper
         public const int WS_CHILD = 0x40000000, WS_VISIBLE = 0x10000000, WS_DISABLED = 0x08000000, WS_CLIPSIBLINGS = 0x04000000, WS_CLIPCHILDREN = 0x02000000;
         public const int WS_EX_LAYERED = 0x80000;
         public const uint LWA_ALPHA = 0x2;
+        public const int GWL_EXSTYLE = -20;
+        [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int index);
+        [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int index, int value);
         public const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10;
         public static readonly IntPtr HWND_TOP = IntPtr.Zero, HWND_BOTTOM = new IntPtr(1);
         public const uint GW_HWNDNEXT = 2, GW_CHILD = 5;

@@ -228,7 +228,7 @@ namespace VideoWallpaper
                     if (dlg.ShowDialog() != WinForms.DialogResult.OK) return;
                     settings.VideoPath = dlg.FileName;
                     settings.Save();
-                    Rebuild();
+                    SwitchWallpaper();   // 直接淡過去（不能淡的情況會照舊整個重建）
                     RefreshTray();
                 }
             }
@@ -268,7 +268,99 @@ namespace VideoWallpaper
 
             host = DesktopHost.Find();
             if (host == null) return;   // Explorer 還沒準備好，計時器稍後會重試
+            BuildPlayers();
+        }
 
+        // ---------- 換桌布：直接淡過去 ----------
+        // 舊的播放視窗和引擎先留著（照常播），新的建在它們下面；新的每個畫面都畫上第一格以後，舊的視窗在約 0.45 秒內淡出再收掉。
+        // 中間不會閃回 Windows 原本的桌布、也不會黑一下。螢幕、桌面結構變了（或還沒有播放視窗）就照舊整個重建
+        List<ScreenPlayer> fadingPlayers;
+        VideoEngine fadingEngine;
+        DispatcherTimer fadeTimer;
+        long fadeWaitStart, fadeStart;
+        const int FadeMs = 450, FadeWaitLimit = 4000;   // 新的最多等 4 秒（檔案讀不了之類的）就直接換
+
+        void SwitchWallpaper()
+        {
+            FinishFade();
+            bool canFade = HasVideo && engine != null && players.Count > 0 && host != null && Native.IsWindow(host.Parent)
+                && !players.Exists(p => !Native.IsWindow(p.Hwnd)) && ScreenSignature() == screenSignature && !engineLost;
+            if (!canFade) { Rebuild(); return; }
+
+            ticksSinceRebuild = 0;
+            lastError = null;
+            fadingPlayers = new List<ScreenPlayer>(players);
+            fadingEngine = engine;
+            if (lockScreen.Active) lockScreen.Attach(null);   // 鎖定畫面換到新引擎（BuildPlayers 會接回去）
+            players.Clear();
+            engine = null;
+            BuildPlayers();
+            if (engine == null) { FinishFade(); return; }   // 建不起來：舊的收掉，照一般的錯誤處理
+
+            // 舊的放回最上面（還蓋著新的），而且要是 layered 才能淡出（24H2 本來就是）
+            IntPtr shell = host.Raised ? Native.FindWindowEx(host.Parent, IntPtr.Zero, "SHELLDLL_DefView", null) : IntPtr.Zero;
+            const uint flags = Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE;
+            var oldEngine = fadingEngine;
+            foreach (var p in fadingPlayers)
+            {
+                p.Video.Exposed = delegate { oldEngine.RequestRedraw(); };   // 舊視窗要重畫時找舊引擎（engine 已經是新的了）
+                int ex = Native.GetWindowLong(p.Hwnd, Native.GWL_EXSTYLE);
+                if ((ex & Native.WS_EX_LAYERED) == 0)
+                {
+                    Native.SetWindowLong(p.Hwnd, Native.GWL_EXSTYLE, ex | Native.WS_EX_LAYERED);
+                    Native.SetLayeredWindowAttributes(p.Hwnd, 0, 255, Native.LWA_ALPHA);
+                }
+                Native.SetWindowPos(p.Hwnd, shell != IntPtr.Zero ? shell : Native.HWND_TOP, 0, 0, 0, 0, flags);
+            }
+
+            fadeWaitStart = AnimationClock.Now;
+            fadeStart = 0;
+            if (fadeTimer == null)
+            {
+                fadeTimer = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(15) };
+                fadeTimer.Tick += delegate { StepFade(); };
+            }
+            fadeTimer.Start();
+        }
+
+        void StepFade()
+        {
+            if (fadingPlayers == null) { fadeTimer.Stop(); return; }
+            long now = AnimationClock.Now;
+            if (fadeStart == 0)
+            {
+                // 等新的畫上第一格（新引擎被換掉了、等太久就不等）
+                if (engine != null && !engine.Shown && now - fadeWaitStart < FadeWaitLimit) return;
+                fadeStart = now;
+            }
+            double u = Math.Min(1, (now - fadeStart) / (double)FadeMs);
+            double eased = u * u * (3 - 2 * u);
+            byte alpha = (byte)Math.Round(255 * (1 - eased));
+            foreach (var p in fadingPlayers)
+                if (Native.IsWindow(p.Hwnd)) Native.SetLayeredWindowAttributes(p.Hwnd, 0, alpha, Native.LWA_ALPHA);
+            if (u >= 1) FinishFade();
+        }
+
+        // 收掉淡出中的舊播放視窗和引擎（淡完、或中途又要換 / 重建 / 結束時馬上收）
+        void FinishFade()
+        {
+            if (fadeTimer != null) fadeTimer.Stop();
+            if (fadingPlayers == null) return;
+            var old = fadingPlayers;
+            var oldEngine = fadingEngine;
+            fadingPlayers = null;
+            fadingEngine = null;
+            if (oldEngine != null) oldEngine.Dispose();   // 先放開 Direct3D 資源，再關視窗
+            foreach (var p in old)
+            {
+                try { p.Video.DestroyHandle(); } catch { }
+                try { p.Container.DestroyHandle(); } catch { }
+            }
+        }
+
+        // 每個螢幕建一個播放視窗、建播放引擎（host 已經找好）
+        void BuildPlayers()
+        {
             foreach (var screen in WinForms.Screen.AllScreens)
             {
                 try { players.Add(CreatePlayer(screen)); }
@@ -314,6 +406,7 @@ namespace VideoWallpaper
 
         void DestroyPlayers()
         {
+            FinishFade();   // 換桌布淡出到一半：舊的也一起收掉
             // 先停掉引擎（放開 Direct3D 資源），再關視窗
             if (lockScreen.Active) lockScreen.Attach(null);   // 鎖定畫面先跟舊引擎脫離，新引擎建好再接回去
             if (engine != null) { engine.Dispose(); engine = null; }

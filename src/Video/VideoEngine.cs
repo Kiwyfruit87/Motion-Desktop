@@ -123,6 +123,8 @@ namespace VideoWallpaper
         volatile int presentedFrames;                          // 成功輸出的新畫面數量
         public int MillisecondsSinceHealthy { get { return Environment.TickCount - lastHealthyTick; } }
         public int PresentedFrames { get { return presentedFrames; } }
+        volatile bool shown;                                   // 每個畫面都已經畫上第一格（換桌布時舊的等到這時才淡出，見 WallpaperApp.SwitchWallpaper）
+        public bool Shown { get { return shown; } }
 
         volatile int positionMs;   // 目前播放到哪裡（控制面板的預覽會對齊這個位置）
         public TimeSpan Position { get { return TimeSpan.FromMilliseconds(positionMs); } }
@@ -579,6 +581,7 @@ namespace VideoWallpaper
                 if (hr == 0 && newFrame) presentedFrames++;
             }
             if (!anyVisible) lastHealthyTick = Environment.TickCount;   // 全部被蓋住時本來就不畫
+            if (!shown && targets.Count > 0 && frameReady && targets.TrueForAll(x => x.Presented)) shown = true;
         }
 
         // 圖片桌布：照縮放方式把圖片畫進 into（影片畫布或輸出畫面）；失敗回傳負的（跟 TransferVideoFrame 一樣）
