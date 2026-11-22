@@ -25,13 +25,30 @@ namespace VideoWallpaper
             public int SheetWidth, SheetHeight, SheetFor;   // SheetFor：照多高的螢幕畫的
             public int SheetFailedFor;                      // 照這個螢幕高度畫長圖失敗過（太長、記憶體不夠）：不再重畫，這首就不顯示歌詞
             public double[] Centers, Heights;   // 每一行在長圖上的中心高度、行高
+            public LockClock.LyricsGlyphs[] Glyphs;   // 放大歌詞每一行的字在長圖上的位置（逐字亮用；一般大小的是 null）
             public double Spacing;
+            // 照不同大小畫的長圖（鎖定畫面的一般大小、放大的歌詞各一份）：歌詞一樣，長圖各自一張。快取裡的是共用的那份，Get 回傳的是照要的大小的那份
+            internal Dictionary<long, Result> Views;
+        }
+
+        // r 照 height（字的大小）、width（長圖的寬，0 = 照 height 的一般寬度）畫長圖的那份（沒有就建一份，歌詞跟 r 一樣）；要在 lock (gate) 裡呼叫
+        static Result View(Result r, int height, int width)
+        {
+            if (r.Views == null) r.Views = new Dictionary<long, Result>();
+            long id = ((long)height << 32) | (uint)width;
+            Result v;
+            if (!r.Views.TryGetValue(id, out v))
+            {
+                v = new Result { Lines = r.Lines, Synced = r.Synced, Failed = r.Failed, When = r.When };
+                r.Views[id] = v;
+            }
+            return v;
         }
 
         static readonly Dictionary<string, Result> cache = new Dictionary<string, Result>();
         static readonly Queue<string> cacheOrder = new Queue<string>();   // 查過的歌（先查的在前面），只留最近 50 首
         const int CacheLimit = 50;
-        static readonly HashSet<string> loading = new HashSet<string>();
+        static readonly Dictionary<string, List<Action>> loading = new Dictionary<string, List<Action>>();   // 正在查 / 畫的工作，和做完要通知的人（同一份工作後來又要的也記著，做完全部通知）
         static readonly List<Result> sheets = new List<Result>();   // 有長圖的歌（一張好幾 MB，只留最近畫的 3 首；同一首只會出現一次）
         static readonly object gate = new object();
 
@@ -44,18 +61,34 @@ namespace VideoWallpaper
         public static bool SheetReady(Result r, int screenHeight) { return Has(r) && r.Sheet != null && r.SheetFor == screenHeight; }
 
         // 回傳 null 代表還在查；查完（有歌詞的話連長圖也畫好）會在 UI 執行緒呼叫 loaded
-        public static Result Get(NowPlaying.Track track, int screenHeight, Action loaded)
+        // width：長圖多寬（像素；0 = 跟一般大小的卡片一樣寬）
+        public static Result Get(NowPlaying.Track track, int screenHeight, Action loaded, int width = 0)
         {
             if (track.Ad) return NoLyrics;   // 廣告：不查（也不要把查不到記在廣告後那首歌上）
             string key = SongKey(track);
             Result cached;
+            // 查歌詞的工作照歌記（同一首只查一次）；已經查到、只是這個大小的長圖還沒畫的，照「歌 + 大小」記（兩種大小可以同時畫）
+            string job;
             lock (gate)
             {
                 bool have = cache.TryGetValue(key, out cached) && !(cached.Failed && (DateTime.UtcNow - cached.When).TotalSeconds > 15);
-                if (have && (!Has(cached) || SheetReady(cached, screenHeight) || cached.SheetFailedFor == screenHeight)) return cached;
-                if (loading.Contains(key)) return have ? cached : null;
-                loading.Add(key);
-                if (!have) cached = null;
+                if (have && !Has(cached)) return cached;
+                if (have)
+                {
+                    var view = View(cached, screenHeight, width);
+                    if (SheetReady(view, screenHeight) || view.SheetFailedFor == screenHeight) return view;
+                    job = key + "\n" + screenHeight + "\n" + width;
+                    List<Action> waiting;
+                    if (loading.TryGetValue(job, out waiting)) { waiting.Add(loaded); return view; }
+                }
+                else
+                {
+                    job = key;
+                    List<Action> waiting;
+                    if (loading.TryGetValue(job, out waiting)) { waiting.Add(loaded); return null; }
+                    cached = null;
+                }
+                loading[job] = new List<Action> { loaded };
             }
             var ui = Dispatcher.CurrentDispatcher;
             string title = track.Title, artist = track.Artist, album = track.Album ?? "";
@@ -70,30 +103,70 @@ namespace VideoWallpaper
                     catch { r = new Result { Failed = true }; }
                     r.When = DateTime.UtcNow;
                 }
-                if (Has(r)) DrawSheet(r, screenHeight);
-                lock (gate)
+                if (Has(r))
                 {
-                    if (!cache.ContainsKey(key)) cacheOrder.Enqueue(key);
-                    cache[key] = r;
-                    loading.Remove(key);
-                    // 查過的歌太多了：最早查的拿掉（程式開很久時記憶體才不會一直變大）
-                    while (cache.Count > CacheLimit && cacheOrder.Count > 0)
-                    {
-                        Result old;
-                        string oldest = cacheOrder.Dequeue();
-                        if (oldest == key) { cacheOrder.Enqueue(key); continue; }   // 現在這首不拿掉，排回最後面
-                        if (!cache.TryGetValue(oldest, out old)) continue;
-                        cache.Remove(oldest);
-                        if (sheets.Remove(old)) { old.Sheet = null; old.SheetBlur = null; }
-                    }
+                    Result view;
+                    lock (gate) view = View(r, screenHeight, width);
+                    DrawSheet(view, screenHeight, width);
                 }
-                ui.BeginInvoke(loaded);
+                Store(key, job, r, ui);
             });
             return cached;
         }
 
+        // 只要歌詞的文字、不畫長圖（src\Private 才有用到：鎖定畫面沒開時也要知道歌詞）。回傳 null 代表還在查，查完不通知，過一下再問
+        public static Result Text(NowPlaying.Track track)
+        {
+            if (track.Ad) return NoLyrics;
+            string key = SongKey(track);
+            lock (gate)
+            {
+                Result cached;
+                if (cache.TryGetValue(key, out cached) && !(cached.Failed && (DateTime.UtcNow - cached.When).TotalSeconds > 15)) return cached;
+                if (loading.ContainsKey(key)) return null;
+                loading[key] = new List<Action>();
+            }
+            var ui = Dispatcher.CurrentDispatcher;
+            string title = track.Title, artist = track.Artist, album = track.Album ?? "";
+            double duration = track.Duration.TotalSeconds;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                Result r;
+                try { r = Fetch(title, artist, album, duration); }
+                catch { r = new Result { Failed = true }; }
+                r.When = DateTime.UtcNow;
+                Store(key, key, r, ui);
+            });
+            return null;
+        }
+
+        // 查好的歌詞記進快取，通知等著這份工作的人
+        static void Store(string key, string job, Result r, Dispatcher ui)
+        {
+            List<Action> done;
+            lock (gate)
+            {
+                if (!cache.ContainsKey(key)) cacheOrder.Enqueue(key);
+                cache[key] = r;
+                if (!loading.TryGetValue(job, out done)) done = new List<Action>();
+                loading.Remove(job);
+                // 查過的歌太多了：最早查的拿掉（程式開很久時記憶體才不會一直變大）
+                while (cache.Count > CacheLimit && cacheOrder.Count > 0)
+                {
+                    Result old;
+                    string oldest = cacheOrder.Dequeue();
+                    if (oldest == key) { cacheOrder.Enqueue(key); continue; }   // 現在這首不拿掉，排回最後面
+                    if (!cache.TryGetValue(oldest, out old)) continue;
+                    cache.Remove(oldest);
+                    if (old.Views != null)
+                        foreach (var v in old.Views.Values) if (sheets.Remove(v)) { v.Sheet = null; v.SheetBlur = null; }
+                }
+            }
+            foreach (var callback in done) if (callback != null) ui.BeginInvoke(callback);
+        }
+
         // 在另一條執行緒畫長圖（WPF 要在 STA 執行緒上畫），不會卡住鎖定畫面
-        static void DrawSheet(Result r, int screenHeight)
+        static void DrawSheet(Result r, int screenHeight, int width)
         {
             var thread = new Thread(delegate()
             {
@@ -103,16 +176,18 @@ namespace VideoWallpaper
                     double[] centers, heights;
                     double spacing;
                     int[] blurred;
-                    var pixels = LockClock.RenderLyricsSheet(screenHeight, r.Lines, out w, out h, out centers, out heights, out spacing, out blurred);
+                    LockClock.LyricsGlyphs[] glyphs;
+                    var pixels = LockClock.RenderLyricsSheet(screenHeight, width, r.Lines, out w, out h, out centers, out heights, out spacing, out blurred, out glyphs);
                     lock (gate)
                     {
                         r.SheetWidth = w; r.SheetHeight = h; r.Centers = centers; r.Heights = heights; r.Spacing = spacing; r.SheetFor = screenHeight;
+                        r.Glyphs = glyphs;
                         r.Sheet = pixels;
                         r.SheetBlur = blurred;
                         // 移到最後面（重畫的歌原本就在清單裡的話先拿掉，才不會有兩筆、清掉舊的那筆時把剛畫好的長圖也清掉）
                         sheets.Remove(r);
                         sheets.Add(r);
-                        while (sheets.Count > 3) { sheets[0].Sheet = null; sheets[0].SheetBlur = null; sheets.RemoveAt(0); }
+                        while (sheets.Count > 4) { sheets[0].Sheet = null; sheets[0].SheetBlur = null; sheets.RemoveAt(0); }   // 現在這首的一般大小和放大的各一張、再留前兩張
                     }
                 }
                 catch { lock (gate) r.SheetFailedFor = screenHeight; }   // 畫不出來：記下來，之後不再重畫（不然每次重整都會再畫一次）

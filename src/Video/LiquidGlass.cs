@@ -132,6 +132,26 @@ float4 SheetBlend(float4 pos : SV_Position) : SV_Target
     return float4(lerp(snap, video, Src.y), 1.0);
 }
 
+// Backdrop：放大歌詞時整個背景糊掉、暗一點（像 Apple Music 全螢幕歌詞）。
+// Src：程度（0～1）、暗到多少（1 = 不暗）、畫面寬高；Dir.xy：重模糊圖蓋到的範圍（像素，四分之一解析度乘 4，可能比畫面大一點）。
+// 糊得比暗得快（程度一半時已經糊了八成）：淡入時先看到背景散開，不是先變暗
+// Dir.z：封面色調的濃度、Dir.w：封面的顏色（r·65536 + g·256 + b，0～255）。左側、下方再暗一點（暗角），歌詞那一側的白字才清楚
+float4 Backdrop(float4 pos : SV_Position) : SV_Target
+{
+    float2 uv = pos.xy / Src.zw;
+    float3 a = SceneTex.SampleLevel(Lin, uv, 0).rgb;
+    float3 b = BlurBTex.SampleLevel(Lin, pos.xy / Dir.xy, 0).rgb;
+    float k = saturate(Src.x);
+    float3 c = lerp(a, b, saturate(k * 1.6));
+    float vig = 1.0 - 0.3 * smoothstep(0.35, 1.0, uv.y) - 0.25 * (1.0 - smoothstep(0.0, 0.7, uv.x));
+    c *= lerp(1.0, Src.y * vig, k);
+    float p = Dir.w;
+    float3 tint = float3(floor(p / 65536.0), fmod(floor(p / 256.0), 256.0), fmod(p, 256.0)) / 255.0;
+    float l = dot(c, float3(0.2126, 0.7152, 0.0722));
+    c = lerp(c, saturate(l * tint * 2.2), Dir.z * k);   // 帶一點封面的顏色（照原本的明暗）
+    return float4(c, 1.0);
+}
+
 // SheetComposite：畫好的頁面（SceneTex，鎖定畫面座標，含時鐘、卡片；桌布還沒淡入時背景就是快照，見 SheetBlend）整張往下移到現在的位置；
 // 頁面外露出快照，緊貼下緣一道淡淡的影子。移動中的頁面是一塊圓角的玻璃：下緣、左右兩側往裡一段是玻璃的邊，
 // 像凸透鏡一樣越靠近邊越往頁面裡面取樣（裡面的東西被拉長、放大到邊上），紅綠藍偏的量不同（色散），邊上一條細亮線。Src.y（淡入）這裡不用
@@ -727,7 +747,7 @@ float4 TextGlass(float4 pos : SV_Position) : SV_Target
             [MarshalAs(UnmanagedType.LPStr)] string entryPoint, [MarshalAs(UnmanagedType.LPStr)] string target, uint flags1, uint flags2, out IntPtr code, out IntPtr errors);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate IntPtr BlobFn(IntPtr self);
 
-        static byte[] vsCode, downCode, blurCode, glassCode, textCode, sheetBlendCode, sheetCompositeCode;
+        static byte[] vsCode, downCode, blurCode, glassCode, textCode, sheetBlendCode, sheetCompositeCode, backdropCode;
         static int compileState;   // 0 還沒開始、1 編譯中、2 好了、3 失敗
 
         // 開始在背景編譯（已經在編、編好了就不重來）
@@ -746,6 +766,7 @@ float4 TextGlass(float4 pos : SV_Position) : SV_Target
                     try { textCode = Compile(src, "TextGlass", "ps_4_0"); } catch { textCode = null; }   // 失敗只有時鐘退回實心字
                     try { sheetBlendCode = Compile(src, "SheetBlend", "ps_4_0"); sheetCompositeCode = Compile(src, "SheetComposite", "ps_4_0"); }
                     catch { sheetBlendCode = sheetCompositeCode = null; }   // 失敗只是鎖定畫面照原本整個視窗滑進來
+                    try { backdropCode = Compile(src, "Backdrop", "ps_4_0"); } catch { backdropCode = null; }   // 失敗只是放大歌詞時背景不糊
                     Interlocked.Exchange(ref compileState, 2);
                 }
                 catch
@@ -829,7 +850,7 @@ float4 TextGlass(float4 pos : SV_Position) : SV_Target
         readonly UpdatePixelsFn updatePixels;
         readonly ClearStateFn clearState;
 
-        IntPtr vs, downPs, blurPs, glassPs, textPs, sheetBlendPs, sheetCompositePs, sampler, glassBuffer, passBuffer, animBuffer;
+        IntPtr vs, downPs, blurPs, glassPs, textPs, sheetBlendPs, sheetCompositePs, backdropPs, sampler, glassBuffer, passBuffer, animBuffer;
         public const int ClockAnimFloats = (2 + 48 + 1) * 4;   // 跟 cbuffer ClockAnim 一樣的排法
         static readonly float[] noAnim = new float[ClockAnimFloats];
         readonly float[] glassData = new float[33 * 4];   // 跟 cbuffer GlassInfo 一樣的排法（33 個 float4）
@@ -896,6 +917,7 @@ float4 TextGlass(float4 pos : SV_Position) : SV_Target
                 || createPs(device, sheetBlendCode, (IntPtr)sheetBlendCode.Length, IntPtr.Zero, out sheetBlendPs) < 0
                 || createPs(device, sheetCompositeCode, (IntPtr)sheetCompositeCode.Length, IntPtr.Zero, out sheetCompositePs) < 0)
             { Free(ref sheetBlendPs); Free(ref sheetCompositePs); }   // 只是鎖定畫面照原本滑進來
+            if (backdropCode == null || createPs(device, backdropCode, (IntPtr)backdropCode.Length, IntPtr.Zero, out backdropPs) < 0) backdropPs = IntPtr.Zero;
             var sd = new SamplerDesc { Filter = 0x15 /* 線性 */, AddressU = 3, AddressV = 3, AddressW = 3 /* 超出範圍用邊緣的顏色 */, ComparisonFunc = 1, MaxLod = float.MaxValue };
             if (ComVtable.Method<CreateSamplerFn>(device, 23)(device, ref sd, out sampler) < 0) return false;   // ::CreateSamplerState
             var bd = new BufferDesc { ByteWidth = (uint)(glassData.Length * 4), BindFlags = 0x4 /* 常數 */ };
@@ -971,6 +993,48 @@ float4 TextGlass(float4 pos : SV_Position) : SV_Target
             update(context, passBuffer, 0, IntPtr.Zero, passData, 0, 0);
             draw(context, 3, 0);
             clearState(context);
+        }
+
+        // ---------- 放大歌詞時的背景 ----------
+        public bool BackdropSupported { get { return backdropPs != IntPtr.Zero; } }
+
+        // scene（整個畫面的影片）糊掉、暗一點畫到 target：amount 0～1（淡入淡出）、dim 暗到多少；scale 以 1080p 為 1。
+        // reblur = false：沿用上次的模糊圖（影片沒換格）。這個物件專門畫背景（模糊圖跟畫面一樣大，不要跟卡片共用，不然每一格都要重建）
+        public bool DrawBackdrop(IntPtr scene, int w, int h, IntPtr target, float amount, float dim, float scale, bool reblur, float tintAmount, int tintRgb)
+        {
+            if (backdropPs == IntPtr.Zero) return false;
+            int qw = Math.Max(1, (w + 3) / 4), qh = Math.Max(1, (h + 3) / 4);
+            clearState(context);
+            Common();
+            if (qw != blurW || qh != blurH) { if (!CreateBlur(qw, qh)) { clearState(context); return false; } reblur = true; }
+            if (reblur)
+            {
+                // 縮成四分之一 → 先用小的間距糊過（細節抹平，不會拆成重影）→ 再用中等的間距糊兩次
+                // （1080p 約 15 像素：細節糊掉，但認得出背景是什麼——自己的桌布當底，慢慢看歌詞）
+                SetTarget(blur[0].Rtv, 0, 0, qw, qh);
+                psSetShader(context, downPs, IntPtr.Zero, 0);
+                one[0] = scene; psSetResources(context, 0, 1, one);
+                SetPass(0, 0, w, h, 0, 0);
+                draw(context, 3, 0);
+                one[0] = IntPtr.Zero; psSetResources(context, 0, 1, one);
+                psSetShader(context, blurPs, IntPtr.Zero, 0);
+                float r = 0.6f * scale;
+                BlurPass(blur[0], blur[1], r, 0); BlurPass(blur[1], blur[0], 0, r);
+                float r2 = 0.75f * scale;   // 1080p 約 9 像素：認得出桌布，細節糊掉
+                BlurPass(blur[0], blur[1], r2, 0); BlurPass(blur[1], blur[0], 0, r2);
+                BlurPass(blur[0], blur[1], r2, 0); BlurPass(blur[1], blur[3], 0, r2);
+                one[0] = IntPtr.Zero; psSetResources(context, 1, 1, one);
+            }
+            SetTarget(target, 0, 0, w, h);
+            psSetShader(context, backdropPs, IntPtr.Zero, 0);
+            three[0] = scene; three[1] = blur[2].Srv; three[2] = blur[3].Srv;
+            psSetResources(context, 0, 3, three);
+            SetPass(amount, dim, w, h, qw * 4, qh * 4);
+            passData[6] = tintAmount; passData[7] = tintRgb;
+            update(context, passBuffer, 0, IntPtr.Zero, passData, 0, 0);
+            draw(context, 3, 0);
+            clearState(context);
+            return true;
         }
 
         // 32 位元浮點數換成 16 位元（超過範圍的夾到 ±65504；距離圖的值不會小到需要次正規數，直接當 0）
@@ -1193,7 +1257,7 @@ float4 TextGlass(float4 pos : SV_Position) : SV_Target
         {
             ReleaseScratch();
             Free(ref glassBuffer); Free(ref passBuffer); Free(ref animBuffer); Free(ref sampler);
-            Free(ref sheetBlendPs); Free(ref sheetCompositePs);
+            Free(ref sheetBlendPs); Free(ref sheetCompositePs); Free(ref backdropPs);
             Free(ref textPs); Free(ref glassPs); Free(ref blurPs); Free(ref downPs); Free(ref vs);
         }
     }

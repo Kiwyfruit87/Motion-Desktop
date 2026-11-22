@@ -8,6 +8,7 @@ set WPF=%FW%\WPF
   /out:"%~dp0VideoWallpaper.exe" /win32manifest:"%~dp0app.manifest" ^
   /r:"%WPF%\PresentationFramework.dll" /r:"%WPF%\PresentationCore.dll" /r:"%WPF%\WindowsBase.dll" ^
   /r:System.Xaml.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll ^
+  /resource:"%~dp0data\cmudict.gz",cmudict ^
   /recurse:"%~dp0src\*.cs"
 if errorlevel 1 (echo 編譯失敗 / Build failed & exit /b 1)
 echo 編譯完成 / Build succeeded: %~dp0VideoWallpaper.exe

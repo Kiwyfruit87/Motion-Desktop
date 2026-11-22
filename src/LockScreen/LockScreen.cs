@@ -11,7 +11,7 @@ namespace VideoWallpaper
     partial class LockScreen
     {
         const uint SWP_NOSIZE = 0x1, SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10, SWP_SHOWWINDOW = 0x40;
-        static readonly int[] HotKeys = { 0x20, 0x0D, 0x1B, 0x4C };   // 空白鍵、Enter、Esc（滑走）、L（歌詞）（用按鍵代碼當登記編號）
+        static readonly int[] HotKeys = { 0x20, 0x0D, 0x1B, 0x4C, 0x46 };   // 空白鍵、Enter、Esc（滑走）、L（歌詞）、F（放大歌詞）（用按鍵代碼當登記編號）
 
         readonly List<LockWindow> windows = new List<LockWindow>();
         readonly List<KeyValuePair<Rect, string>> buttons = new List<KeyValuePair<Rect, string>>();   // 卡片上的按鈕在主螢幕上的位置
@@ -40,6 +40,7 @@ namespace VideoWallpaper
         DispatcherTimer pressWatch;  // 按著時每 0.1 秒看左鍵還有沒有按著（放開的訊息被別的視窗收走時）
         string shownColorKey;        // 卡片上現在是哪個顏色（跟著專輯封面）
         bool colorShown;             // 卡片的顏色已經放上去了（之後顏色變了才淡入淡出）
+        LockClock.EdgeStrip[] shownEdges;   // 螢幕四邊的光暈現在放的是哪一份（放大歌詞時才有）
         bool busy;                   // 正在滑進來 / 滑出去
         int openCount;               // 第幾次打開（開場動畫的計時器認得是不是同一次）
 
@@ -77,6 +78,155 @@ namespace VideoWallpaper
             }
         }
 
+        // ---------- 放大歌詞 ----------
+        // 歌詞開著時按歌詞區右上角的放大鈕：音樂卡片連同上面的歌詞整塊移到畫面正中間放大（字照放大後的大小重畫，才清楚），
+        // 背景糊掉、暗一點，時鐘淡出（見 VideoEngine.Zoom.cs）。再按一次、按 Esc / 空白鍵、點卡片以外的地方、關掉歌詞就縮回來
+        bool big;
+        bool wantBig;   // 按了放大，放大的歌詞還在畫：畫好就放大
+        bool autoBig;   // 放大中因為換到沒有歌詞的歌（廣告）自己縮回來：之後又有歌詞就自己放大回去（自己縮回、關掉歌詞就不會）
+
+        internal bool Big { get { return big; } }
+        // 歌詞長圖照多高的螢幕畫（字的大小）、多寬（版面見 LockClock.BigControls）；另一種大小的（先在背景畫好）
+        internal int LyricsHeight { get { return LyricsHeightFor(big); } }
+        internal int LyricsWidth { get { return LyricsWidthFor(big); } }
+        internal int OtherLyricsHeight { get { return LyricsHeightFor(!big); } }
+        internal int OtherLyricsWidth { get { return LyricsWidthFor(!big); } }
+        int LyricsHeightFor(bool b) { return primary == null ? 0 : b ? LockClock.BigLyricsHeight(primary.Bounds.Height) : primary.Bounds.Height; }
+        int LyricsWidthFor(bool b) { return primary == null || !b ? 0 : LockClock.BigLyricsWidth(primary.Bounds.Width, primary.Bounds.Height); }
+
+        // 卡片連同往上延伸的歌詞區（玻璃整塊）在畫面上的範圍
+        static double[] Block(LockClock.MusicCard c, int ext) { return new double[] { c.InnerX, c.InnerY - ext, c.InnerW, c.InnerH + ext }; }
+
+        // 放大 / 縮回來：卡片、歌詞照新的大小重畫（重畫的那幾個指令送完前先別畫，不會有一格新舊混在一起），
+        // 再讓播放引擎把新的那塊從舊的位置、大小平順地移過去，背景同時糊掉 / 變清楚
+        bool switching;   // 正在照新的大小重畫（重畫的途中不要又自己縮回來）
+        bool shrinking;   // 正在換大小（還沒照新的大小重畫），這段時間點了不理
+        const int ZoomMs = 700;   // 卡片換大小（有彈性，約 0.7 秒停好）；背景糊掉 / 變清楚快一點
+        const int BackdropMs = 450;
+
+        // 放大 / 縮回來：玻璃從原本的範圍有彈性地變成新的範圍（圓角跟著變），裡面空著；
+        // 玻璃停好之後，照新的大小重畫好的內容淡入
+        string wantSong;    // 按放大時是哪首歌（放大的歌詞畫好時已經換歌了就不放大）
+        int growStart;      // 上次開始放大的時間：玻璃還在長的這 0.7 秒內不能縮回去（不然玻璃會從動畫中途跳到終點再縮）
+
+        void SetBig(bool on)
+        {
+            wantBig = false;
+            if (on == big || switching || shrinking || !Active || engine == null || primary == null) return;
+            if (!on && Environment.TickCount - growStart < ZoomMs) return;
+            if (card == null)
+            {
+                // 沒在播了（卡片拿掉了）：沒有東西可以縮回去，背景直接變清楚
+                if (on) return;
+                big = false;
+                Beat.Vocal(false);
+                engine.SetBackdrop(primary.Handle, 0, BackdropMs);
+                return;
+            }
+            Release();
+            progress.OnDrop();   // 拖著進度條時換大小：先放開
+            if (on)
+            {
+                if (!lyrics.On) return;
+                var track = NowPlaying.Current;
+                if (track == null) return;
+                int bigHeight = LyricsHeightFor(true), bigWidth = LyricsWidthFor(true);
+                string song = Lyrics.SongKey(track);
+                var ready = Lyrics.Get(track, bigHeight, delegate
+                {
+                    var playing = NowPlaying.Current;
+                    if (wantBig && Active && !big && lyrics.On && playing != null && Lyrics.SongKey(playing) == wantSong) SetBig(true);
+                }, bigWidth);
+                if (!Lyrics.SheetReady(ready, bigHeight))
+                {
+                    // 還在畫：畫好再放大（這首沒有歌詞、或放大的長圖畫不出來就算了）
+                    wantBig = ready == null || (Lyrics.Has(ready) && ready.SheetFailedFor != bigHeight);
+                    wantSong = song;
+                    if (!wantBig) autoBig = false;   // 放大的長圖畫不出來：不要一直重試
+                    return;
+                }
+                growStart = Environment.TickCount;
+                autoBig = false;
+                Beat.Vocal(true);   // 一按放大就開始聽人聲（要先聽 2 秒才判斷得出來）
+            }
+            // 按下去玻璃就開始變形（圓角跟著變），卡片上的東西很快淡掉；
+            // 等它淡完（玻璃空著、正在變形）才照新的大小重畫，畫好等玻璃停好再淡入——重畫要一點時間，但不會讓按下去之後愣一下
+            // 放大的版面沒有玻璃（播放控制浮在桌布上）：放大時卡片的玻璃往整個畫面化開、一邊淡掉（卡片融進場景）；
+            // 縮回時從整個畫面收回卡片、一邊浮現
+            double[] screen = { 0, 0, primary.Bounds.Width, primary.Bounds.Height };
+            double screenRadius = 60 * primary.Bounds.Height / 1080.0;
+            var from = on ? Block(card, lyrics.Extension) : screen;
+            var to = on ? screen : TargetBlock(false, lyrics.On);
+            engine.MorphCard(primary.Handle, from[0], from[1], from[2], from[3], to[0], to[1], to[2], to[3],
+                on ? card.Radius : screenRadius, on ? screenRadius : TargetRadius(false), on ? 1 : 0, on ? 0 : 1, ZoomMs);
+            engine.SetBackdrop(primary.Handle, on ? 1 : 0, BackdropMs);
+            shrinking = true;
+            int opened = openCount;
+            // 放大：等玻璃撐滿整個畫面、完全淡掉才換圖（放上大張的歌詞約 50 毫秒，玻璃還在動的時候換會頓一下）；縮回：卡片上的東西淡完就換
+            UiTimer.After(on ? 600 : SwapMs, delegate
+            {
+                shrinking = false;
+                if (!Active || opened != openCount || engine == null || primary == null) return;
+                engine.SetStage(primary.Handle, on);   // 放大：歌詞不在玻璃裡、播放控制會自動淡出
+                Redraw(on);
+                // 放大的版面沒有玻璃，不用等玻璃停好：早一點淡入；縮回來等卡片的玻璃大致停好再淡入
+                engine.MorphSwap(primary.Handle, on ? 620 : 380, 220);
+                if (!on) engine.SetBackdrop(primary.Handle, 0, BackdropMs);   // 縮回途中換了引擎（新引擎背景還是糊的）：一起變清楚
+                if (on) ShowControls(true);
+            });
+        }
+
+        // 換到 b 這種版面時，玻璃整塊的範圍（一般：卡片連往上延伸的歌詞區；放大：底部的膠囊）、圓角（跟重畫之後的一樣）
+        double[] TargetBlock(bool b, bool withLyrics)
+        {
+            int x, y, w, h;
+            LockClock.CardPlace(primary.Bounds.Width, primary.Bounds.Height, b, out x, out y, out w, out h);
+            double s0 = primary.Bounds.Height / 1080.0;
+            int ext = withLyrics && !b ? LockClock.LyricsExtension(s0, s0) : 0;
+            return new double[] { x, y - ext, w, h + ext };
+        }
+
+        double TargetRadius(bool b)
+        {
+            int x, y, w, h;
+            LockClock.CardPlace(primary.Bounds.Width, primary.Bounds.Height, b, out x, out y, out w, out h);
+            return b ? h / 2.0 : LockClock.CardRadius(primary.Bounds.Height / 1080.0);   // 膠囊：圓角是高度的一半
+        }
+
+        // ---------- 放大歌詞時的播放控制：滑鼠不動約 3 秒就淡出，一動（或按鍵、點一下）又出來 ----------
+        bool controlsShown = true;
+        int controlsAt;   // 上次有動作的時間
+        const int ControlsIdleMs = 3000;
+
+        void ShowControls(bool show)
+        {
+            if (show) controlsAt = Environment.TickCount;
+            if (!big || engine == null || primary == null || show == controlsShown) return;
+            controlsShown = show;
+            engine.SetStageControls(primary.Handle, show, show ? 200 : 450);
+        }
+
+        // 時鐘的計時器每秒看一次：放大歌詞、播放控制開著、一陣子沒動作（也沒在按、沒在拖進度條）就淡出
+        void CheckControlsIdle()
+        {
+            if (big && controlsShown && !touching && !progress.Scrubbing && !shrinking && Environment.TickCount - controlsAt > ControlsIdleMs) ShowControls(false);
+        }
+
+        const int SwapMs = 130;          // 卡片上的東西淡完（變形開始後 15%）就重畫
+
+        // 照新的大小重畫卡片和歌詞（卡片上的東西這時是淡掉的，見 MorphCard）
+        void Redraw(bool on)
+        {
+            big = on;
+            Beat.Vocal(on);   // 放大歌詞：聽人聲（逐字亮對準開口時間、長音結束）
+            controlsShown = true;   // 換了版面：播放控制先是看得到的（見 SetStage）
+            lyrics.Switch();
+            colorShown = false;   // 光暈的圖也要照新的大小重畫（螢幕四邊的光不用：沒放大時 Edges 是 null，會淡出拿掉）
+            switching = true;
+            try { Refresh(true); }
+            finally { switching = false; }
+        }
+
         // 給 LockProgress / LockLyrics 用
         internal bool Busy { get { return busy; } }
         internal VideoEngine Engine { get { return engine; } }
@@ -98,11 +248,14 @@ namespace VideoWallpaper
                 w.Dismiss = OnDismiss;
                 w.Leave = OnLeave;
                 w.Exposed = delegate { if (engine != null) engine.RequestRedraw(); };
+                w.Wheel = OnWheel;   // 滾輪可能送到任何一個螢幕的視窗（焦點在哪就給誰）：都照主螢幕的歌詞捲
                 windows.Add(w);
                 if (screen.Primary || primary == null) primary = w;
             }
             primary.Click = OnClick;
             primary.LyricsKey = OnLyricsKey;
+            primary.ZoomKey = delegate { if (!busy && engine != null && (big || lyrics.On)) SetBig(!big); };   // F：歌詞開著時放大 / 縮回
+            primary.Moved = delegate { ShowControls(true); };   // 放大歌詞時滑鼠一動：播放控制出來
             primary.Drag = delegate(int x, int y)
             {
                 if (touching && engine != null) engine.TouchLiquid(primary.Handle, x, y, true);   // 白光跟著手指（顯示卡重設的空檔沒有引擎）
@@ -135,6 +288,7 @@ namespace VideoWallpaper
             clockTimer.Tick += delegate
             {
                 Refresh(false);
+                CheckControlsIdle();
                 Weather.Refresh(delegate { if (Active) Refresh(true); });
                 // 滑鼠停 2.5 秒就把游標藏起來（停在音樂卡片上時不藏：可能正要按按鈕）
                 if (LockWindow.CursorShown && (DateTime.Now - LockWindow.LastMove).TotalSeconds > 2.5 && !CursorOnCard())
@@ -171,7 +325,17 @@ namespace VideoWallpaper
             engine.PulseLevel = beatGlow ? Beat.Glow : (Func<long, double>)null;   // 卡片邊框的光暈跟著抓到的重拍亮
             foreach (var w in windows) engine.AddTarget(w.Handle, w.Bounds.Width, w.Bounds.Height, w == primary);
             lyrics.Detach();      // 新引擎上還沒有歌詞的圖，要重新放上去
+            if (big && !shrinking)
+            {
+                // 放大歌詞中換了引擎（換桌布、顯示卡重設）：新引擎不知道現在是放大的版面，要重新告訴它——
+                // 不然卡片的玻璃又畫出來、歌詞和左上角的歌名被當成在玻璃裡面而整個裁掉。背景照樣糊（正在縮回去的不用）
+                engine.SetStage(primary.Handle, true);
+                engine.SetBackdrop(primary.Handle, 1, 0);
+                controlsShown = true;   // SetStage 之後播放控制是看得到的
+                controlsAt = Environment.TickCount;
+            }
             colorShown = false;   // 卡片的顏色也是
+            shownEdges = null;
             Refresh(true);
             engine.RequestRedraw();
         }
@@ -185,6 +349,16 @@ namespace VideoWallpaper
             double micLevel = lyrics.Load(track, delegate { if (Active) Refresh(true); });   // 第一次會在背景查歌詞，查完再整個重畫
             ShowMusic(track, force, micLevel);
             lyrics.Update();
+            // 放大中歌詞不見了（關掉歌詞、換到沒有歌詞的歌、沒在播了）：縮回來
+            if (big && !switching && !shrinking && (card == null || !lyrics.On || !lyrics.Available))
+            {
+                // 換到沒有歌詞的歌（例如廣告）、沒在播了：記著，之後換到有歌詞的歌就自己再放大；自己把歌詞關掉的不算
+                autoBig = lyrics.On;
+                SetBig(false);
+            }
+            if (!lyrics.On) autoBig = false;
+            else if (autoBig && !big && !switching && !shrinking && !wantBig && card != null && lyrics.CanToggle) SetBig(true);   // 廣告完了、又有歌詞：放大回去
+            if (wantBig && !lyrics.On) wantBig = false;   // 等放大的歌詞畫好時把歌詞關了：不放大了
         }
 
         // 上方的時鐘、日期和天氣：時間、日期、天氣變了才重畫（或換了播放引擎）。歌詞查完、天氣回來的整個重整不重畫時鐘
@@ -246,12 +420,18 @@ namespace VideoWallpaper
             shownPlaying = playing;
             Modes(track, out shownShuffle, out shownRepeat);   // 剛按了隨機 / 循環的 2 秒內，照按下去的樣子畫（不會跳回舊的）
             var found = new List<KeyValuePair<Rect, string>>();
-            card = LockClock.RenderMusic(track, playing, shownShuffle, shownRepeat, primary.Bounds.Width, primary.Bounds.Height, found);
+            card = LockClock.RenderMusic(track, playing, shownShuffle, shownRepeat, primary.Bounds.Width, primary.Bounds.Height, found, big);
             var c = card ?? new LockClock.MusicCard();   // 沒在播：每張圖都是 null，拿掉
             // 卡片本身是播放引擎畫的液態玻璃；舊顯示卡畫不了的話，退回毛玻璃（底下的影片糊掉，再貼這張霧白和邊框）
             engine.SetLiquidCard(primary.Handle, c.Spec);
             engine.SetGlassOverlay(primary.Handle, "music", c.Chrome, c.Width, c.Height, c.X, c.Y, c.InnerX, c.InnerY, c.InnerW, c.InnerH, c.Radius);
             ShowCardColor(c);
+            // 放大歌詞：節奏、換歌的光在螢幕四邊（顏色變了慢慢換過去；放大、縮回時淡入淡出）
+            if (!ReferenceEquals(c.Edges, shownEdges) || c.Edges == null && shownEdges != null)
+            {
+                engine.SetEdgeGlow(primary.Handle, c.Edges, c.Edges != null && shownEdges != null ? 700 : 300);
+                shownEdges = c.Edges;
+            }
 
             // 換歌：只有內容（封面、歌名、歌手）在動——舊的往左滑一小段淡出、新的從右邊滑進來淡入（按「上一首」換回來的話方向相反）；
             // 按鈕、歌詞圓鈕、進度條和時間都不動
@@ -264,6 +444,13 @@ namespace VideoWallpaper
             }
             SetCardLayer("musicInfo", c.Info, shift, 1, 0);
             SetCardLayer("musicCover", c.Cover, shift, 1, 0);
+            // 放大歌詞：左上角的封面、歌名、歌手（沒有玻璃；平常沒有）。換歌時跟卡片一樣：舊的往左滑一小段淡出、新的從右邊滑進來
+            // （上一首反過來）；其他時候（放大、縮回、重畫）淡入淡出
+            if (shift != 0 && c.StageInfo != null)
+                engine.SetSlideOverlay(primary.Handle, "lyricsStage", c.StageInfo, c.StageW, c.StageH, c.StageX, c.StageY, OverlayLayer.Lyrics,
+                    0, 0, primary.Bounds.Width, primary.Bounds.Height, shift, 450, 1, 0);
+            else
+                engine.SetFadeOverlay(primary.Handle, "lyricsStage", c.StageInfo, c.StageW, c.StageH, c.StageX, c.StageY, OverlayLayer.Lyrics, switching ? 0 : 300);
             SetCardLayer("musicButtons", c.Buttons, 0, 1, 0);
             SetCardLayer("musicPlay", c.PlayKey, 0, playing ? 0 : 1, 0);
             SetCardLayer("musicPause", c.PauseKey, 0, playing ? 1 : 0, 0);
@@ -505,6 +692,22 @@ namespace VideoWallpaper
             }
             if (busy) return false;
             if (engine == null) return true;   // 顯示卡重設的空檔（還沒接上新的引擎）：點了不理，也不滑走
+            if (shrinking) return true;   // 正在換大小：點了不理
+            if (big)
+            {
+                // 放大歌詞：同步鈕回去跟著播放；點某一行跳到那行開始唱的地方；點在歌詞那段的其他地方不理（不縮回去）
+                if (lyrics.SyncHit(x, y)) { lyrics.Follow(); return true; }
+                double time;
+                if (lyrics.LineAt(x, y, out time))
+                {
+                    if (progress.SeekTo(NowPlaying.Current, time)) lyrics.Follow();
+                    return true;
+                }
+                if (lyrics.InView(x, y)) return true;
+            }
+            if (big && !controlsShown) { ShowControls(true); return true; }   // 放大歌詞、播放控制淡掉了：點一下先把它叫出來
+            if (big) ShowControls(true);
+            if (lyrics.ZoomHit(x, y)) { SetBig(!big); return true; }   // 歌詞區右上角的放大鈕
             foreach (var b in buttons)
                 if (b.Key.Contains(x, y))
                 {
@@ -540,10 +743,19 @@ namespace VideoWallpaper
             return true;
         }
 
+        // 滾輪：放大歌詞時自己捲歌詞
+        void OnWheel(int delta)
+        {
+            if (Active && !busy && big && !shrinking && engine != null) lyrics.Wheel(delta);
+        }
+
         // 空白鍵 / 滑鼠：往上滑走，回到桌面
         void OnDismiss()
         {
             if (!Active || busy) return;
+            wantBig = false;
+            autoBig = false;   // 廣告中按了 Esc / 空白鍵：之後不要再自己放大
+            if (big) { EndPageDrag(); SetBig(false); return; }   // 放大歌詞中：先縮回來（再按一次才滑走）
             EndPageDrag();   // 按著還沒拖動時按了空白鍵之類的：不用等放開
             bool blocked = false;
             BeforeDismiss(ref blocked);
@@ -599,6 +811,8 @@ namespace VideoWallpaper
         bool OnPress()
         {
             if (!Active || busy || primary == null) return false;   // 正在滑：照舊（OnDismiss 會不理它）
+            if (big && !controlsShown) { ShowControls(true); return true; }   // 放大歌詞、播放控制淡掉了：點一下先把它叫出來
+            if (big) { SetBig(false); return true; }   // 放大歌詞中點卡片以外的地方：縮回來（不拖頁面、不滑走）
             Native.POINT p;
             if (!Native.GetCursorPos(out p)) return false;
             pageDrag = new PageDrag { PressY = p.Y };
@@ -833,6 +1047,7 @@ namespace VideoWallpaper
             lastClock = null;
             clockEngine = null; shownClock = null; clockGen++;
             lyrics.Close();
+            big = false; wantBig = false; autoBig = false;   // 下次打開是一般大小
             shownSong = null;   // 下次打開時卡片直接出現，不播換歌動畫
             shownMicLevel = -1;
             expectPlaying = null;
@@ -845,9 +1060,10 @@ namespace VideoWallpaper
             progress.Stop();
             card = null;
             colorShown = false;
+            shownEdges = null;
             shownColorKey = null;
             NowPlaying.Stop();
-            Beat.Stop();
+            Beat.StopAll();   // 光暈、歌詞的人聲都不聽了
             buttons.Clear();
             if (primary != null) foreach (var hotkey in HotKeys) Native.UnregisterHotKey(primary.Handle, hotkey);   // 還給其他程式
             primary = null;

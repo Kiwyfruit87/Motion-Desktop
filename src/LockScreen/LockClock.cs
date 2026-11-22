@@ -14,8 +14,13 @@ namespace VideoWallpaper
         // 歌詞跟 ChromeOS 一樣用 Google Sans（fonts 資料夾裡的 Google Sans Flex，開源授權；拉丁字母含各種帶符號的字母都有）。
         // Google Sans 沒有的字依序找：俄文、希臘文用 Segoe UI（有真的半粗體，粗細才跟旁邊的字一致），
         // 中文和日文假名用微軟正黑體，韓文用 Malgun Gothic
-        static readonly FontFamily LyricsFont = new FontFamily(
+        static readonly FontFamily SansFont = new FontFamily(
             new Uri(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fonts") + "\\"), "./#Google Sans Flex, Segoe UI, Microsoft JhengHei UI, Malgun Gothic");
+        // 歌詞也可以換成自己電腦上的字型（跟時鐘一樣放在 fonts\local，不進 repo）：lyrics.ttf / .otf 給一般大小的歌詞（半粗體的字型檔）、
+        // lyrics-big.ttf / .otf 給放大的歌詞（粗體的字型檔；沒有就用 lyrics 那個）。都沒有就用 Google Sans Flex
+        const string LyricsFallback = ", Segoe UI, Microsoft JhengHei UI, Malgun Gothic";
+        static readonly FontFamily LyricsFont = LocalFont("lyrics", SansFont, LyricsFallback);
+        static readonly FontFamily BigLyricsFont = LocalFont("lyrics-big", LyricsFont, LyricsFallback);
         static readonly FontFamily IconFont = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets");
         // 時鐘和音樂卡片用 Inter（fonts 資料夾裡，開源授權；最接近 Apple 的 SF Pro）；中文用微軟正黑體，其他照歌詞的順序
         static readonly FontFamily CardFont = new FontFamily(
@@ -23,21 +28,26 @@ namespace VideoWallpaper
 
         // 時鐘可以換成自己電腦上的字型：fonts\local 資料夾（不進 repo）裡的 clock.ttf 給時間的大數字、date.ttf 給日期那一行，有就用、沒有就用 Inter。
         // 給有授權限制、不能跟著程式散佈的字型用；字型檔要是已經定好粗細、寬度的一般字型（可變字型請先切出來），粗細照字型檔本身
-        static readonly FontFamily ClockFont = LocalFont("clock.ttf"), DateFont = LocalFont("date.ttf");
+        static readonly FontFamily ClockFont = LocalFont("clock", CardFont, CardFallback), DateFont = LocalFont("date", CardFont, CardFallback);
         static readonly bool clockFontLocal = ClockFont != CardFont, dateFontLocal = DateFont != CardFont;
-        static FontFamily LocalFont(string file)
+        const string CardFallback = ", Microsoft JhengHei UI, Segoe UI, Malgun Gothic";   // 字型裡沒有的字（中文等）照 CardFont 的順序找
+
+        // fonts\local 裡的 name.ttf（或 .otf）；沒有、讀不了就用 fallback。字型裡沒有的字照 chain 的順序找
+        static FontFamily LocalFont(string name, FontFamily fallback, string chain)
         {
             try
             {
                 string dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fonts", "local");
-                string path = Path.Combine(dir, file);
-                if (File.Exists(path))
-                    foreach (var name in new GlyphTypeface(new Uri(path)).FamilyNames.Values)   // 這個檔案自己的字型名稱（Fonts.GetFontFamilies 會列出整個資料夾的）
-                        // 字型裡沒有的字（中文等）照 CardFont 的順序找
-                        return new FontFamily(new Uri(dir + "\\"), "./" + file + "#" + name + ", Microsoft JhengHei UI, Segoe UI, Malgun Gothic");
+                foreach (string ext in new[] { ".ttf", ".otf" })
+                {
+                    string file = name + ext, path = Path.Combine(dir, file);
+                    if (!File.Exists(path)) continue;
+                    foreach (var family in new GlyphTypeface(new Uri(path)).FamilyNames.Values)   // 這個檔案自己的字型名稱（Fonts.GetFontFamilies 會列出整個資料夾的）
+                        return new FontFamily(new Uri(dir + "\\"), "./" + file + "#" + family + chain);
+                }
             }
             catch { }
-            return CardFont;
+            return fallback;
         }
 
         // 圖的四周留給陰影的空間
@@ -50,7 +60,29 @@ namespace VideoWallpaper
 
         // 卡片邊框線的寬度（見 DrawChrome 的玻璃邊緣）
         const double EdgeWidth = 1.5;
-        public static double LyricsWidth(double s) { return Math.Round(368 * s); }   // 跟卡片裡面一樣寬（卡片 400 − 兩邊 16）
+        public static double LyricsWidth(double s) { return Math.Round(368 * s); }
+        // 放大歌詞的版面（照 Apple Music 的全螢幕歌詞：慢慢看歌詞，自己的桌布當底）。以下是 1080p 的像素：
+        //   歌詞沒有框，直接排在輕糊的桌布上：靠左（左邊 BigLyricsLeft）、最寬 BigLyricsMaxW、字 20 × BigLyrics（約 72，粗體）；
+        //   露出的範圍從 BigViewTop 開始、高 BigViewH（目前這行在中間，約畫面高度的 43%），上下柔和地淡出；
+        //   左上角一小列封面、歌名、歌手（上緣 BigInfoTop）；
+        //   進度條和播放鍵在底部中央的玻璃膠囊（BigCapsuleW × BigCapsuleH，以膠囊的縮放 BigControls 為準；離下緣 BigCapsuleBottom），
+        //   滑鼠不動約 3 秒就淡出，一動又出來（見 LockScreen 的 ShowControls）
+        public const double BigControls = 1.15, BigLyrics = 3.6;
+        public const double BigLyricsLeft = 160, BigLyricsMaxW = 1600, BigViewTop = 160, BigViewH = 600, BigInfoTop = 64;
+        public const double BigCapsuleW = 560, BigCapsuleH = 114, BigCapsuleDy = -84, BigCapsuleBottom = 56;
+
+        // 放大時歌詞的長圖：字照多高的螢幕放大、一行多寬（像素）
+        public static int BigLyricsHeight(int screenHeight) { return (int)Math.Round(screenHeight * BigLyrics); }
+        public static int BigLyricsWidth(int screenWidth, int screenHeight)
+        {
+            double s = screenHeight / 1080.0;
+            return (int)Math.Round(Math.Min(BigLyricsMaxW * s, screenWidth - 2 * BigLyricsLeft * s));
+        }
+
+        // 歌詞露出的高度（大約 5 行）、歌詞顯示時卡片的玻璃往上延伸多少（歌詞本身扣掉疊進卡片的 12、上面再留 16）
+        // s：歌詞的字的縮放；cardScale：卡片的縮放
+        public static int LyricsView(double s) { return (int)Math.Round(200 * s); }
+        public static int LyricsExtension(double s, double cardScale) { return LyricsView(s) + (int)Math.Round(4 * cardScale); }
 
         // 把內容加上陰影畫成一張半透明圖（周圍留 pad 的空間給陰影）
         // shadow = false：不加陰影（歌詞在卡片的玻璃裡，跟卡片上的字一樣不加）

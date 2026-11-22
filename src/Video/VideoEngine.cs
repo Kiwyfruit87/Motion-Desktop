@@ -58,6 +58,22 @@ namespace VideoWallpaper
             public CardMotion Motion;
             public readonly Spring ClockWarpS = new Spring();   // 時鐘拉長的量（平滑過，見 ClockWarp）
             public long ClockWarpAt;
+            // 放大歌詞（見 VideoEngine.Zoom.cs）：先別畫、卡片換大小的動畫、背景模糊的程度和畫好的背景
+            public bool Frozen;
+            public double[] MorphA, MorphB;   // 玻璃從哪個範圍變到哪個範圍（左上、寬高）
+            public bool Stage;                     // 放大歌詞的版面（見 SetStage）
+            public double StageFrom = 1, StageTo = 1;   // 放大歌詞時播放控制看得到多少（淡入淡出）
+            public long StageStart;
+            public int StageMs;
+            public Tween SyncFade = new Tween(0);           // 「同步歌詞」玻璃膠囊看得到多少（見 SetSyncGlass）
+            public double SyncX, SyncY, SyncW, SyncH;
+            public long MorphStart, MorphFadeAt;   // 變形開始的時間、新的圖開始淡入的時間
+            public int MorphMs, MorphMode, MorphFadeMs;
+            public double BackdropFrom, BackdropTo;
+            public long BackdropStart;
+            public int BackdropMs;
+            public IntPtr BackdropTexture, BackdropView, BackdropRtv, BackdropScene;
+            public bool BackdropBlurred;
             public bool LiquidActive;
             public IntPtr LiquidRtv, LiquidScene;
             public int LiquidBlurX, LiquidBlurY, LiquidBlurW, LiquidBlurH;
@@ -544,6 +560,7 @@ namespace VideoWallpaper
             {
                 // 被視窗蓋住的螢幕就不畫，省資源（還沒畫過的除外：等第一格解碼好，先畫一格上去）
                 if (!t.Visible && (t.Presented || !frameReady)) continue;
+                if (t.Frozen) continue;   // 換圖的指令還沒送完（放大歌詞）：這一格先不畫，送完再畫
                 if (!all && t.OverlayCount == 0 && t.Presented && t.Sheet == null) continue;   // 只是疊圖在動：沒有疊圖的畫面不用重畫
                 if (t.Visible) anyVisible = true;
                 MFVideoNormalizedRect src;
@@ -565,15 +582,22 @@ namespace VideoWallpaper
                 }
                 transferFailures = 0;
                 // 乾淨的影片整張蓋上去，再貼疊圖。鎖定畫面滑動中：影片和底下桌面的快照混成這一格的背景（卡片、時鐘的玻璃也折射它）
-                if (t.VideoTexture != IntPtr.Zero && !SheetBegin(t, AnimationClock.Now)) copyResource(context, t.BackBuffer, t.VideoTexture);
+                if (t.VideoTexture != IntPtr.Zero && !SheetBegin(t, AnimationClock.Now))
+                {
+                    copyResource(context, t.BackBuffer, t.VideoTexture);
+                    BackdropBegin(t, AnimationClock.Now);   // 放大歌詞：背景糊掉、暗一點（卡片的玻璃也折射它）
+                }
+                // 時鐘的玻璃數字先畫（也在疊圖底下）；換分鐘的動畫中就再畫下一格。
+                // 時鐘在卡片後面：放大歌詞時卡片會蓋到時鐘的範圍，時鐘的那塊（字以外是原本的背景）不能蓋在卡片的玻璃上
+                if (DrawClockGlass(t, AnimationClock.Now)) redraw = true;
                 if (t.Liquid != null || t.Motion != null)
                 {
                     if (DrawLiquidBase(t, AnimationClock.Now)) redraw = true;   // 卡片的液態玻璃（在影片上、疊圖底下）；卡片還在動就再畫下一格
                 }
                 else t.LiquidActive = false;
-                if (DrawClockGlass(t, AnimationClock.Now)) redraw = true;   // 時鐘的玻璃數字（也在疊圖底下）；換分鐘的動畫中就再畫下一格
                 if (DrawOverlay(t)) redraw = true;   // 歌詞捲動、淡入淡出中：下一次螢幕更新再畫一次
                 SheetEnd(t, AnimationClock.Now);      // 滑動中：畫好的頁面整張移到現在的位置，下面露出快照，邊上一條玻璃
+                BackdropEnd(t);
                 hr = t.SwapChain.Present(0, 0);
                 if (hr < 0) { Lost(Lang.T("輸出畫面失敗 0x", "Presenting the frame failed 0x") + hr.ToString("X8")); return; }
                 if (hr == 0) t.Presented = true;   // DXGI_STATUS_OCCLUDED（例如鎖定中）時其實沒畫上去，不算
@@ -661,6 +685,8 @@ namespace VideoWallpaper
                 if (image != null) { image.Release(); image = null; }
                 if (liquid != null) { liquid.Release(); liquid = null; }
                 if (clockLiquid != null) { clockLiquid.Release(); clockLiquid = null; }
+                if (backdropLiquid != null) { backdropLiquid.Release(); backdropLiquid = null; }
+                backdropTried = false;
                 if (output != null) Marshal.ReleaseComObject(output);
                 if (d2dFactory != IntPtr.Zero) { Marshal.Release(d2dFactory); d2dFactory = IntPtr.Zero; }
                 if (factory != null) Marshal.ReleaseComObject(factory);

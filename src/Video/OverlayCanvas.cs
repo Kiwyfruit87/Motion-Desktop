@@ -37,6 +37,9 @@ namespace VideoWallpaper
             // 只露出 (x, y, w, h) 這段的圓角長方形 (shapeX, y, shapeW, h)：進度條已播放的部分，左端圓、右端切平
             public virtual void FillSolid(double x, double y, double w, double h, double radius, double r, double g, double b, double a, double shapeX, double shapeW) { }
             public virtual void Resume() { }   // End 之後接著畫（中間插了 Direct3D 的第二層玻璃）
+            // 接下來畫的只露出畫面上的 (x, y, w, h)（逐字亮的歌詞用）；做不到的回傳 false（不用 PopClipRect）
+            public virtual bool PushClipRect(double x, double y, double w, double h) { return false; }
+            public virtual void PopClipRect() { }
         }
 
         // Direct2D：直接在顯示卡上畫，不用把畫面借給 GDI；位置可以有小數（線性內插），捲動、滑動更滑
@@ -175,6 +178,14 @@ namespace VideoWallpaper
             }
 
             public override void Resume() { d2d.Begin(); }
+
+            public override bool PushClipRect(double x, double y, double w, double h)
+            {
+                d2d.PushClip(x, y, Math.Max(0, w), Math.Max(0, h));
+                return true;
+            }
+
+            public override void PopClipRect() { d2d.PopClip(); }
         }
 
         // 退回 GDI：這台電腦不支援 Direct2D 時才用。只能畫在整數位置、不能做毛玻璃

@@ -63,7 +63,14 @@ namespace VideoWallpaper
         // 換歌了：之前那首多大聲、鼓點多重都不能用了，從頭重新聽
         public static void Reset() { resetWanted = true; }
 
+        // 邊框光暈要聽（歌詞的人聲另外用 Vocal 開關，見 Beat.Vocal.cs；兩個其中一個要就開著聽）
         public static void Start()
+        {
+            glowWanted = true;
+            StartListening();
+        }
+
+        static void StartListening()
         {
             lock (gate)
             {
@@ -74,7 +81,7 @@ namespace VideoWallpaper
             }
         }
 
-        public static void Stop() { running = false; }
+        public static void Stop() { glowWanted = false; running = glowWanted || vocalWanted; }
 
         // 邊框光暈現在的亮度（0～1，now 是播放引擎的動畫時間）：最近算好的亮度。聲音每 10 毫秒才來一包，
         // 正在往下退的話，還沒來的這一小段照樣接著退；正在變亮就先停在那裡等下一包（不然會一退一補、微微閃爍）。
@@ -190,6 +197,7 @@ namespace VideoWallpaper
         {
             Detector detector = null;
             detector = new Detector(rate) { Show = (time, value, falling) => Publish(time, value, falling, detector.ReleaseNow), Strongest = strongest, Drumness = drumness };
+            VocalDetector vocal = null;   // 放大歌詞時才聽；每次重新開始聽都從頭算（舊的時間、音量對不上）
             bool fineTimer = false;
             try
             {
@@ -229,6 +237,8 @@ namespace VideoWallpaper
                             for (int i = 0; i < count; i++) floats[i] = shorts[i] / 32768f;
                         }
                         detector.Add(floats, got, channels, packetTime);
+                        if (vocalWanted) { if (vocal == null) vocal = new VocalDetector(rate); vocal.Add(floats, got, channels, packetTime); }
+                        else vocal = null;
                         capture.ReleaseBuffer(got);
                         if (capture.GetNextPacketSize(out frames) != 0) return;
                     }

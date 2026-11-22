@@ -121,6 +121,18 @@ namespace VideoWallpaper
             Update(NowPlaying.Current, playing, true);   // 時間整張重畫（拖曳中畫的沒有柔光）
         }
 
+        // 跳到第 seconds 秒（放大歌詞時點了某一行）：跟放開進度條一樣，播放器回報之前先照新的位置走。播放器不接受跳轉就回傳 false
+        public bool SeekTo(NowPlaying.Track track, double seconds)
+        {
+            if (track == null || !track.CanSeek || scrubbing) return false;
+            holding = true;
+            holdSeconds = Math.Max(0, seconds);
+            heldAt = Environment.TickCount;
+            NowPlaying.Seek(holdSeconds);
+            Update(track, playing, false);
+            return true;
+        }
+
         void Scrub(int x)
         {
             var card = owner.Card;

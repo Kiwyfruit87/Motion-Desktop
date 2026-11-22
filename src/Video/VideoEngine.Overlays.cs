@@ -44,8 +44,16 @@ namespace VideoWallpaper
             public double[] DotsShown;
             public long DotsDrawnAt;
             public bool DotsEasing;   // 還在追（暫停中也要繼續畫到追上）
+            // 逐字亮（放大歌詞時正在唱的那一行，唱到哪亮到哪）：SweepRows 是這行每一列（折行）的上下緣（長圖的列，兩個一組）；
+            // SweepCells 每五個一組：第幾列、字的左右（長圖的 x）、開始和結束唱的時間（秒，從這行開始算）；
+            // SweepStart 是這行開始的時間（引擎的時鐘），暫停時停在 SweepAt 秒；SweepDim 是還沒唱到的字多亮（0～1）。SweepCells = null：沒有
+            public float[] SweepRows, SweepCells;
+            public bool SweepPaused;
+            public long SweepStart;
+            public double SweepAt, SweepDim, SweepEnd;   // SweepEnd：整行唱完是第幾秒（之後不用一直重畫）
             // 跟著重拍閃的光暈（卡片邊框的光）：平常看不到，亮度跟著 PulseLevel 亮起來再暗回去
             public bool Pulse;
+            public bool ScreenEdge;   // 螢幕四邊的光暈（放大歌詞時節奏、換歌的光改在這裡；卡片邊框的光暈那時不畫）
             // 左右滑動（換歌時封面和文字的翻頁動畫），只在 Clip 範圍內看得到
             public Tween Move;
             public bool Clip;
@@ -74,7 +82,7 @@ namespace VideoWallpaper
 
             public bool Running(long now)
             {
-                return Scroll.Running(now) || ShadeMix.Running(now) || Fade.Running(now) || Move.Running(now) || Dots && (!DotsPaused || DotsEasing)
+                return Scroll.Running(now) || ShadeMix.Running(now) || Fade.Running(now) || Move.Running(now) || Dots && (!DotsPaused || DotsEasing) || SweepCells != null && !SweepPaused && now - SweepStart < (SweepEnd + 0.2) * 1000
                     || Zoom != null && Zoom.Moving(ZoomTo, 0.0005) || MarqueeW > 0;
             }
 
@@ -111,6 +119,20 @@ namespace VideoWallpaper
             WithTarget(hwnd, delegate(Target t, long now)
             {
                 ReplaceFading(t, now, name, pixels, width, height, x, y, z, fadeMs, delegate(Overlay o) { o.Pulse = pulse; });
+            });
+        }
+
+        // 放大歌詞時螢幕四邊的光暈（四張，見 LockClock.EdgeStrip）：跟著重拍、換歌亮；strips 是 null 就淡出拿掉
+        public void SetEdgeGlow(IntPtr hwnd, LockClock.EdgeStrip[] strips, int fadeMs)
+        {
+            WithTarget(hwnd, delegate(Target t, long now)
+            {
+                for (int i = 0; i < 4; i++)
+                {
+                    var e = strips != null && i < strips.Length ? strips[i] : null;
+                    ReplaceFading(t, now, "edgeGlow" + i, e == null ? null : e.Pixels, e == null ? 0 : e.W, e == null ? 0 : e.H, e == null ? 0 : e.X, e == null ? 0 : e.Y,
+                        OverlayLayer.Glass, fadeMs, delegate(Overlay o) { o.Pulse = true; o.ScreenEdge = true; });
+                }
             });
         }
 
@@ -311,6 +333,91 @@ namespace VideoWallpaper
             });
         }
 
+        // 逐字亮：正在唱的那一行（rows、cells 的排法見 Overlay.SweepRows / SweepCells；cells = null 拿掉）。
+        // elapsed：這行已經唱了幾秒；playing = false 時停在那一刻；dim：還沒唱到的字多亮
+        public void SetLyricsSweep(IntPtr hwnd, string name, float[] rows, float[] cells, double elapsed, bool playing, double dim)
+        {
+            WithOverlay(hwnd, name, delegate(Overlay o, long now)
+            {
+                o.SweepRows = cells == null ? null : rows;
+                o.SweepCells = cells;
+                o.SweepPaused = !playing;
+                o.SweepAt = elapsed;
+                o.SweepStart = now - (long)(elapsed * 1000);
+                o.SweepDim = dim;
+                o.SweepEnd = 0;
+                if (cells != null) for (int i = 4; i < cells.Length; i += 5) o.SweepEnd = Math.Max(o.SweepEnd, cells[i]);
+            });
+        }
+
+        // 亮的邊緣那段漸層多寬（照那一列的高度）
+        static double SweepFeather(double rowH) { return Math.Max(6, 0.55 * rowH); }
+
+        // 這一格每一列（折行）亮的邊緣在哪（長圖的 x，漸層的正中間）：整列唱完是 +∞（整列全亮）、還沒開始是 −∞。
+        // 每一列第一個字的左邊往外多半個漸層、最後一個字的右邊也是：邊緣從字的外面掃進來、掃出去，頭尾不會突然亮一塊
+        double[] sweepLit = new double[0], sweepMin = new double[0], sweepMax = new double[0];
+        bool[] sweepPending = new bool[0];
+        double[] SweepLit(Overlay o, long now)
+        {
+            double e = o.SweepPaused ? o.SweepAt : (now - o.SweepStart) / 1000.0;
+            int rows = o.SweepRows.Length / 2;
+            if (sweepLit.Length < rows) { sweepLit = new double[rows]; sweepMin = new double[rows]; sweepMax = new double[rows]; sweepPending = new bool[rows]; }
+            var c = o.SweepCells;
+            for (int r = 0; r < rows; r++) { sweepLit[r] = double.NegativeInfinity; sweepMin[r] = double.MaxValue; sweepMax[r] = double.MinValue; sweepPending[r] = false; }
+            for (int i = 0; i + 4 < c.Length; i += 5)
+            {
+                int r = Math.Max(0, Math.Min(rows - 1, (int)c[i]));
+                sweepMin[r] = Math.Min(sweepMin[r], c[i + 1]); sweepMax[r] = Math.Max(sweepMax[r], c[i + 2]);
+            }
+            for (int i = 0; i + 4 < c.Length; i += 5)
+            {
+                int r = Math.Max(0, Math.Min(rows - 1, (int)c[i]));
+                double half = SweepFeather(o.SweepRows[2 * r + 1] - o.SweepRows[2 * r]) / 2;
+                double x0 = c[i + 1], x1 = c[i + 2], t0 = c[i + 3], t1 = c[i + 4];
+                if (x0 <= sweepMin[r]) x0 -= half;
+                if (x1 >= sweepMax[r]) x1 += half;
+                if (e < t1) sweepPending[r] = true;
+                if (e >= t1) sweepLit[r] = Math.Max(sweepLit[r], x1);
+                else if (e > t0) sweepLit[r] = Math.Max(sweepLit[r], x0 + (x1 - x0) * (e - t0) / Math.Max(1e-3, t1 - t0));
+            }
+            for (int r = 0; r < rows; r++) if (!sweepPending[r] && sweepMax[r] > double.MinValue) sweepLit[r] = double.PositiveInfinity;
+            return sweepLit;
+        }
+
+        // 正在唱的那一行的一條（2 列）：先整條畫成還沒唱到的亮度，再把唱過的部分疊亮；亮的邊緣是柔和的漸層（幾條越來越淡的窄條）。
+        // alpha：這條唱過時的亮度；dimAlpha：還沒唱到時的亮度；lit：這列亮到哪（見 SweepLit）；rowH：這列多高（漸層的寬度照它）
+        // b：這條要糊多少（剛換到這行、還在從糊變清楚時；跟一般的行一樣糊的和清楚的兩張交叉淡換，唱過的部分只疊清楚的）
+        static void DrawSweepStrip(OverlayCanvas canvas, Overlay o, int row, int h, double source, double alpha, double dimAlpha, double k, double anchor, double lit, double rowH, double b)
+        {
+            if (b > 0.004 && dimAlpha > 0.004) canvas.StripZoomed(o, true, row, h, source, Math.Min(1, dimAlpha * b), k, anchor);
+            if (b < 0.996 && dimAlpha > 0.004) canvas.StripZoomed(o, false, row, h, source, Math.Min(1, dimAlpha * (1 - b) / (1 - 0.3 * Math.Min(1, dimAlpha * b))), k, anchor);
+            if (double.IsNegativeInfinity(lit) || alpha <= dimAlpha + 0.004) return;
+            double extra = dimAlpha >= 0.999 ? 0 : Math.Min(1, (alpha - dimAlpha) / (1 - dimAlpha)) * (1 - b);   // 疊上去之後剛好是 alpha
+            if (extra <= 0.004) return;
+            if (double.IsPositiveInfinity(lit)) { canvas.StripZoomed(o, false, row, h, source, extra, k, anchor); return; }
+            double left = o.X + o.LineLeft * (1 - k);   // 長圖的 x → 畫面上的 x：left + x × k
+            double y = o.Y + anchor + (row - anchor) * k - 2, hh = h * k + 4;
+            double feather = SweepFeather(rowH), from = lit - feather / 2;
+            // 漸層切成很多 2 像素左右的窄條（切在整數像素上，相鄰兩條剛好接起來、不會重疊出細線），亮度照 smoothstep 往右淡掉：
+            // 條數太少會看得出一階一階的色帶
+            double fx0 = left + from * k, fx1 = left + (from + feather) * k;
+            int p0 = (int)Math.Floor(fx0), p1 = (int)Math.Ceiling(fx1);
+            if (!canvas.PushClipRect(o.X - 20, y, p0 - (o.X - 20), hh)) { canvas.StripZoomed(o, false, row, h, source, extra, k, anchor); return; }
+            canvas.StripZoomed(o, false, row, h, source, extra, k, anchor);
+            canvas.PopClipRect();
+            int step = Math.Max(2, (int)Math.Ceiling((p1 - p0) / 40.0));
+            for (int x = p0; x < p1; x += step)
+            {
+                int x1 = Math.Min(p1, x + step);
+                double u = Math.Max(0, Math.Min(1, ((x + x1) / 2.0 - fx0) / Math.Max(1e-3, fx1 - fx0)));
+                double a = extra * (1 - u * u * (3 - 2 * u));
+                if (a <= 0.004) continue;
+                canvas.PushClipRect(x, y, x1 - x, hh);
+                canvas.StripZoomed(o, false, row, h, source, a, k, anchor);
+                canvas.PopClipRect();
+            }
+        }
+
         // 三個點：間奏開始時從左邊長出來（0.45 秒），三個點依序從淡變亮（各佔間奏的三分之一），整組慢慢地呼吸（大小 ±6%、1.8 秒一次），
         // 快結束時縮回去（下一句前 0.2～0.65 秒）；暫停時停在那一刻。
         // 拖進度條跳到間奏的別的地方：亮度和大小在約 0.2 秒內平順地變過去（例如從三個都亮退回只亮第一個）
@@ -475,18 +582,28 @@ namespace VideoWallpaper
                 if (o.ClockDigits && t.ClockGlassOn) continue;   // 玻璃數字取代實心數字
                 double fade = o.Fade.Value(now);
                 if (o.Z >= OverlayLayer.CardEdge || o.Glass) fade *= CardAlpha(t, now);   // 卡片的圖：滑下來時先藏起來
+                if (o.Z == OverlayLayer.CardEdge || o.Z == OverlayLayer.CardContent) fade *= StageAlpha(t, now);   // 放大歌詞：播放控制滑鼠不動就淡出
                 if (o.ClockDigits) fade *= ClockAlpha(t, now);                            // 時鐘的實心數字（畫不出玻璃時）：收起時跟玻璃數字一樣淡出
+                if (o.Follow == 2) fade *= MorphAlpha(t, now);                            // 放大 / 縮回歌詞：卡片上的東西淡入淡出（見 MorphCard）
                 if (fade <= 0.004) continue;
                 Follow(t, canvas, o.Follow, ref follow);
+                if (o.Pulse && t.Stage != o.ScreenEdge) continue;   // 放大歌詞：光暈在螢幕四邊，不在膠囊上；平常反過來
                 if (o.Pulse) fade *= 0.7 * glow;   // 邊框的光暈：只在重拍時亮，最亮 70%（像呼吸，不是閃）
                 if (fade <= 0.004) continue;
-                if (o.Pulse && t.Liquid != null && (Math.Abs(t.Liquid.Extended) > 0.5 || Math.Abs(t.Liquid.Wobbled) > 0.0005 || Math.Abs(t.Liquid.Bulged) > 0.05))
+                if (o.Pulse && !o.ScreenEdge && t.Liquid != null && (Math.Abs(t.Liquid.Extended) > 0.5 || Math.Abs(t.Liquid.Wobbled) > 0.0005 || Math.Abs(t.Liquid.Bulged) > 0.05))
                 {
                     // 歌詞顯示時卡片的玻璃往上延伸、左右彈：光暈跟著玻璃的形狀（上緣往上挪 Extended、左右各挪寬度的一半 × Wobbled；
                     // 往一側鼓出去時整張挪 Bulged 的一半、兩邊各再寬一半）
                     double bulge = t.Liquid.Bulged;
                     canvas.ImageGrown(o, t.Liquid.Spec.W / 2 * t.Liquid.Wobbled + Math.Abs(bulge) / 2, t.Liquid.Extended, Math.Min(1, fade), bulge / 2);
                     continue;
+                }
+                if (o.ViewH == 0 && o.Z == OverlayLayer.Lyrics && o.Follow == 2 && !t.Stage && t.Liquid != null && t.Liquid.Spec != null)
+                {
+                    // 歌詞區裡的小圖（放大鈕）：跟歌詞一樣，玻璃長到它那裡才慢慢出現、縮回去時先消失
+                    var gl = t.Liquid;
+                    fade *= InGlass(o.Y + o.H / 2.0, gl.Spec.Y - gl.Extended, 14 * gl.Spec.Scale);
+                    if (fade <= 0.004) continue;
                 }
                 if (o.ViewH == 0)
                 {
@@ -517,7 +634,7 @@ namespace VideoWallpaper
                 // 歌詞在卡片的玻璃裡：只畫到玻璃現在長到的地方（玻璃往上長、縮回去的途中，上緣以上的字不會先跑出來），
                 // 靠近上緣的那段柔和地淡出。玻璃還在長 / 縮的時候，字跟著玻璃從下面浮上來、沉下去（玻璃還差多少的 0.35），
                 // 上緣淡出的那段也拉長：字是慢慢浮現，不是被移動的邊一刀切進來
-                var lc = o.Follow == 2 ? t.Liquid : null;
+                var lc = o.Follow == 2 && !t.Stage ? t.Liquid : null;   // 放大歌詞：歌詞不在玻璃裡，不用照玻璃裁切
                 double glassTop = lc != null && lc.Spec != null ? lc.Spec.Y - lc.Extended : double.MinValue;
                 double glassFade = lc != null && lc.Spec != null ? 14 * lc.Spec.Scale : 1;
                 double lift = 0;
@@ -532,6 +649,9 @@ namespace VideoWallpaper
                 bool blurMixing = o.Blur != null && o.BlurFrom != null && o.ShadeMix.Running(now);
                 double mix = mixing || blurMixing ? o.ShadeMix.Value(now) : 1;
                 bool blurred = o.D2DBlur != IntPtr.Zero && o.Blur != null;
+                // 逐字亮：這一格每一列亮到哪（正在唱的那一行的範圍內才用）
+                var sweepRows = o.SweepCells != null ? o.SweepRows : null;
+                double[] sweepLit = sweepRows != null && sweepRows.Length >= 2 ? SweepLit(o, now) : null;
                 for (int row = 0; row < o.ViewH; row += 2)
                 {
                     int h = Math.Min(2, o.ViewH - row);
@@ -539,12 +659,22 @@ namespace VideoWallpaper
                     if (source < 0 || source + h > o.H) continue;
                     double alpha = fade * o.Mask[row] * InGlass(o.Y + row + h / 2.0, glassTop, glassFade);
                     int at = Math.Min(o.H - 1, (int)(source + h / 2.0));
-                    if (o.Shade != null) alpha *= mixing ? o.ShadeFrom[at] + (o.Shade[at] - o.ShadeFrom[at]) * mix : o.Shade[at];
+                    double shade = o.Shade == null ? 1 : mixing ? o.ShadeFrom[at] + (o.Shade[at] - o.ShadeFrom[at]) * mix : o.Shade[at];
+                    alpha *= shade;
                     if (alpha <= 0.004) continue;
                     double b = !blurred ? 0 : blurMixing ? o.BlurFrom[at] + (o.Blur[at] - o.BlurFrom[at]) * mix : o.Blur[at];
                     // 這一行的大小：照那行的中心、字的左邊縮放（同一行的每一條接在一起，行跟行之間的空白跟著變寬變窄）
                     double k = o.LineZoom == null ? 1 : mixing && o.LineZoomFrom != null ? o.LineZoomFrom[at] + (o.LineZoom[at] - o.LineZoomFrom[at]) * mix : o.LineZoom[at];
                     double anchor = o.LineAnchor == null ? 0 : o.LineAnchor[at] - top;
+                    if (sweepLit != null && at >= sweepRows[0] - 1 && at < sweepRows[sweepRows.Length - 1] + 1)
+                    {
+                        // 正在唱的那一行：還沒唱到的字暗（不比原本暗：剛換到這行、亮度還在往上變時不會先暗一下），唱過的亮
+                        int r = 0, rows = sweepRows.Length / 2;   // 照這一行的列數（sweepLit 是重複用的陣列，可能比較長）
+                        while (r < rows - 1 && at >= sweepRows[2 * r + 1]) r++;
+                        double dimAlpha = alpha / Math.Max(1e-3, shade) * Math.Min(shade, o.SweepDim);
+                        DrawSweepStrip(canvas, o, row, h, source, alpha, dimAlpha, k, anchor, sweepLit[r], sweepRows[2 * r + 1] - sweepRows[2 * r], b);
+                        continue;
+                    }
                     // 先畫糊的、再把清楚的疊上去。一般的疊法下面那張會被上面那張蓋掉一部分，兩張交叉淡換的途中字會變暗：
                     // 清楚的那張照糊的那張平均蓋掉的比例補回來（糊掉的字筆畫散開，透明度大約只剩 0.3）
                     if (b > 0.004) canvas.StripZoomed(o, true, row, h, source, Math.Min(1, alpha * b), k, anchor);
@@ -584,6 +714,7 @@ namespace VideoWallpaper
             Follow(t, canvas, 0, ref follow);
             canvas.End();
             DrawLiquidTop(t);
+            DrawSyncGlass(t);
             canvas.Resume();
             follow = -1;
         }

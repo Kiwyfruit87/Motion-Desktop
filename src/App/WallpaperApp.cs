@@ -32,6 +32,9 @@ namespace VideoWallpaper
         bool enginePlaying, engineLost;
         int ticksSinceRebuild;
 
+        // 只在自己的電腦上用的功能（src\Private 才有；公開的版本沒有，這行什麼都不做）
+        partial void OwnerStart();
+
         public WallpaperApp(string initialPath)
         {
             settings = Settings.Load();
@@ -47,6 +50,7 @@ namespace VideoWallpaper
             lockScreen.BeatGlow = settings.BeatGlow;
             Weather.SetFixedLocation(settings.WeatherLocation);
             Weather.Refresh(null);   // 先把天氣查好，打開鎖定畫面時就有
+            OwnerStart();
 
             panel = new TrayPanel(this);
             tray = new WinForms.NotifyIcon { Icon = MakeIcon(), Visible = true };

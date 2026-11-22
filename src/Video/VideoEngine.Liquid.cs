@@ -235,13 +235,16 @@ namespace VideoWallpaper
         }
 
         // 歌詞顯示時卡片的玻璃往上延伸 up 像素，把歌詞包進來；0 = 收回。用彈簧長上去、縮回來（稍微回彈一點）
-        public void SetLiquidExtend(IntPtr hwnd, double up)
+        // jump：直接到那個高度、不長上去（放大歌詞換大小時：整塊的縮放動畫已經在動，玻璃不要再長一次）
+        public void SetLiquidExtend(IntPtr hwnd, double up, bool jump = false)
         {
             WithTarget(hwnd, delegate(Target t, long now)
             {
                 if (t.Liquid == null) return;
-                t.Liquid.Extend = up;
-                if (up > 0) t.Liquid.ExtendFull = up;
+                var c = t.Liquid;
+                c.Extend = up;
+                if (up > 0) c.ExtendFull = up;
+                if (jump) { c.ExtendGoal = up; c.Grow.Jump(up); c.Extended = up; }
             });
         }
 
@@ -521,7 +524,8 @@ namespace VideoWallpaper
         // 時鐘現在看得到多少（見 TopFade）
         static double ClockAlpha(Target t, long now)
         {
-            return t.ClockH > 0 ? TopFade(t, t.ClockY + t.ClockH / 2.0, now) : 1;
+            double a = t.ClockH > 0 ? TopFade(t, t.ClockY + t.ClockH / 2.0, now) : 1;
+            return a * (1 - Math.Max(0, Math.Min(1, BackdropAt(t, now))));   // 放大歌詞時時鐘淡出
         }
 
         // 鎖定畫面的頁面開始照 path 滑（0 = 蓋住畫面、1 = 在上方；拖曳中每次移動換一條）：卡片照頁面的動作算慣性
@@ -854,13 +858,15 @@ namespace VideoWallpaper
         {
             sx = sy = 1; dx = dy = 0;
             var spec = t.Liquid != null ? t.Liquid.Spec : null;
-            if (t.Motion == null || spec == null) return;
-            t.Motion.Transform(spec.X + spec.W / 2, spec.Y + spec.H / 2, out sx, out sy, out dx, out dy);
+            if (spec == null) return;
+            if (t.Motion != null) t.Motion.Transform(spec.X + spec.W / 2, spec.Y + spec.H / 2, out sx, out sy, out dx, out dy);
+            // （放大歌詞、縮回來時玻璃在變形，卡片上的東西那段時間是淡掉的，不用跟著動，見 MorphCard）
         }
 
         // 第一層：卡片本身的液態玻璃（影片剛蓋上輸出畫面、還沒貼任何疊圖時畫）。回傳還有沒有在動
         bool DrawLiquidBase(Target t, long now)
         {
+            ExpireMorph(t, now);
             bool moving = StepLiquid(t, now);
             t.LiquidActive = LiquidOn(t);
             if (!t.LiquidActive) return moving;
@@ -873,18 +879,35 @@ namespace VideoWallpaper
             var card = new LiquidGlass.Shape
             {
                 X = (float)cx, Y = (float)cy, HalfW = (float)(spec.W / 2 * (1 + wobble) + Math.Abs(bulge) / 2), HalfH = (float)((spec.H + ext) / 2), Radius = (float)spec.Radius,
-                Appear = (float)CardAlpha(t, now), Thick = (float)Math.Max(0.6, Math.Min(1.5, Math.Min(spec.W, spec.H) / 2 / (cardLook.Bevel * s))),
+                Appear = (float)(CardAlpha(t, now) * GlassAlpha(t, now)), Thick = (float)Math.Max(0.6, Math.Min(1.5, Math.Min(spec.W, spec.H) / 2 / (cardLook.Bevel * s))),
                 Mag = 1, Shadow = 0.11f, D00 = (float)(1 / sx), D11 = (float)(1 / sy),   // 不染色、不放大；很淡、很柔的影子（浮在桌布上，不是黑框）
                 Focus = 0.45f,   // 上下兩條直邊的折射只剩 55%（背景的字不會被拉長）；左右邊、圓角全強度
             };
+            // 放大歌詞、縮回來（見 MorphCard）：玻璃照變形中的範圍畫，不照卡片本身
+            double mx, my, mw, mh, mr;
+            bool morph = MorphRect(t, now, out mx, out my, out mw, out mh, out mr);
+            if (morph)
+            {
+                cx = mx + mw / 2; cy = my + mh / 2;
+                card.X = (float)cx; card.Y = (float)cy; card.HalfW = (float)(mw / 2); card.HalfH = (float)(mh / 2); card.D00 = card.D11 = 1;
+                card.Radius = (float)mr;   // 圓角跟著變（大塊的圓角大，縮回去時慢慢變小）
+            }
             // 模糊的範圍：卡片原本的位置加上四周（卡片的慣性移動也還在範圍裡）；要畫的範圍：卡片現在的位置加上影子
             // 四周 96：邊緣最多往外取樣 90 × 1.022（色差）− 中央放大內縮約 15 ≈ 77，再留模糊的寬度
             int margin = (int)Math.Ceiling(96 * s), slack = (int)Math.Ceiling(90 * s);   // 上下多留 90：卡片慣性晃動最多約 85
             int bx, by, bw, bh, ex, ey, ew, eh;
-            Clip(t, spec.X - margin, spec.Y - ext - margin - slack, spec.W + 2 * margin, spec.H + ext + 2 * (margin + slack), out bx, out by, out bw, out bh);
-            double hw = (spec.W / 2 * (1 + wobble) + Math.Abs(bulge) / 2) * sx, hh = (spec.H + ext) / 2 * sy, pad = 52 * s;
-            Clip(t, cx - hw - pad, cy - hh - pad, 2 * (hw + pad), 2 * (hh + pad), out ex, out ey, out ew, out eh);
+            bool zooming = Zooming(t, now);
+            if (zooming || StageMoving(t, now)) moving = true;
+            // 放大歌詞、縮回來的途中卡片從一個地方移到另一個地方：整個畫面都糊（大小固定，不會每一格重建模糊圖）
+            if (zooming) Clip(t, 0, 0, t.Width, t.Height, out bx, out by, out bw, out bh);
+            else Clip(t, spec.X - margin, spec.Y - ext - margin - slack, spec.W + 2 * margin, spec.H + ext + 2 * (margin + slack), out bx, out by, out bw, out bh);
+            double hw = (spec.W / 2 * (1 + wobble) + Math.Abs(bulge) / 2) * sx, hh = (spec.H + ext) / 2 * sy, pad = 52 * s * Math.Max(sx, sy);
+            if (morph) { hw = mw / 2; hh = mh / 2; pad = 52 * s; }
+            // 上面只留一點：影子往下偏（上緣外幾乎沒有），玻璃上方多畫的那圈會把先畫好的時鐘蓋掉（放大歌詞時玻璃長到時鐘那裡）
+            double padTop = 14 * s;   // 影子在這裡已經淡到 2% 左右，切掉看不出來
+            Clip(t, cx - hw - pad, cy - hh - padTop, 2 * (hw + pad), 2 * hh + pad + padTop, out ex, out ey, out ew, out eh);
             if (bw <= 0 || bh <= 0 || ew <= 0 || eh <= 0) return moving;
+            if (card.Appear <= 0.001f) return moving;   // 放大歌詞的版面沒有玻璃（播放控制直接浮在桌布上）：不用畫
             // 影片沒換格、範圍也沒變：沿用上次的模糊（後面本來就糊掉了，一秒更新 30 次看起來跟 60 次一樣）
             bool reblur = t.FreshVideo && (t.Sheet != null && t.Sheet.Drawing || now - t.LiquidBlurredAt >= 33) ||   // 頁面在滑：每一格都重新模糊（同時鐘）
  bx != t.LiquidBlurX || by != t.LiquidBlurY || bw != t.LiquidBlurW || bh != t.LiquidBlurH;
@@ -898,7 +921,6 @@ namespace VideoWallpaper
         }
 
         readonly LiquidGlass.Shape[] liquidShapes = new LiquidGlass.Shape[LiquidGlass.MaxShapes];
-
         // 按住卡片的白光（兩層玻璃都有）；沒按的時候清掉（質感是重複用的，不能留著上一次的）
         static LiquidGlass.Look WithTouch(LiquidCard c, LiquidGlass.Look look)
         {
@@ -927,7 +949,7 @@ namespace VideoWallpaper
             if (c == null || c.Spec == null) return;
             var spec = c.Spec;
             double s = spec.Scale;
-            double cardAlpha = CardAlpha(t, AnimationClock.Now);   // 鎖定畫面滑下來時卡片先藏起來（見 CardAlpha）
+            double cardAlpha = CardAlpha(t, AnimationClock.Now) * MorphAlpha(t, AnimationClock.Now) * StageAlpha(t, AnimationClock.Now);   // 鎖定畫面滑下來時卡片先藏起來（見 CardAlpha）；放大 / 縮回歌詞時淡入淡出
             // 進度條：高 6（按住時 10，兩端也各往外長 ProgressGrow，兩邊的時間同時讓開）、軌道白 29%（按住 35%；播放器不接受跳轉、不能拖時 20%）、
             // 已播放白 86%（按住 100%）；不知道歌曲長度就不畫。ScrubAmount 衝過頭時大小跟著彈，亮度不用
             if (c.Progress >= 0)
@@ -941,7 +963,8 @@ namespace VideoWallpaper
             // 歌詞圓鈕的底：關著淡白 16.5%、開著白（236，淺色玻璃也不會被當成白字翻黑）；按下時跟玻璃一起放大
             double r = LyricsRadius(c), on = c.OnAmount, la = c.LyricsAlpha;
             double gray = 1 + (236 / 255.0 - 1) * on, alpha = (0.165 * la) * (1 - on) + 0.92 * on;
-            canvas.FillSolid(spec.LyricsX - r, spec.LyricsY - r, r * 2, r * 2, r, gray, gray, gray + (240 - 236) / 255.0 * on, alpha * cardAlpha);
+            if (spec.LyricsR > 0)   // 放大歌詞的膠囊上沒有歌詞圓鈕
+                canvas.FillSolid(spec.LyricsX - r, spec.LyricsY - r, r * 2, r * 2, r, gray, gray, gray + (240 - 236) / 255.0 * on, alpha * cardAlpha);
         }
 
         // 歌詞圓鈕現在的半徑：按下時放大（小按鈕約 1.25 倍，跟原型一樣）
@@ -957,13 +980,14 @@ namespace VideoWallpaper
             if (!t.LiquidActive) return;
             var c = t.Liquid;
             var spec = c.Spec;
+            if (spec.LyricsR <= 0) return;   // 放大歌詞的膠囊上沒有歌詞圓鈕
             double s = spec.Scale, sx, sy, dx, dy;
             CardTransform(t, out sx, out sy, out dx, out dy);
             double r = LyricsRadius(c);
             var lyrics = new LiquidGlass.Shape
             {
                 X = (float)(spec.LyricsX * sx + dx), Y = (float)(spec.LyricsY * sy + dy), HalfW = (float)(r * sx), HalfH = (float)(r * sy), Radius = (float)(r * Math.Min(sx, sy)),
-                Appear = (float)CardAlpha(t, AnimationClock.Now), Thick = 0.22f, Mag = 1, Energy = (float)Math.Min(1, c.Pressed), D00 = 1, D11 = 1,
+                Appear = (float)(CardAlpha(t, AnimationClock.Now) * MorphAlpha(t, AnimationClock.Now) * StageAlpha(t, AnimationClock.Now)), Thick = 0.22f, Mag = 1, Energy = (float)Math.Min(1, c.Pressed), D00 = 1, D11 = 1,
             };
             liquidShapes[0] = lyrics;
             // 範圍：圓鈕加上影子（還有邊緣往外 50 取樣的環境反光）
@@ -975,8 +999,58 @@ namespace VideoWallpaper
             liquid.DrawOnTop(t.BackBuffer, t.LiquidRtv, liquidShapes, 1, WithTouch(c, topLook), ex, ey, ew, eh);
         }
 
+        // 放大歌詞時歌詞下面「同步歌詞」的液態玻璃膠囊（圖示和字是另外的疊圖，畫在玻璃上面）：(x, y, w, h) 是膠囊的範圍，淡入 / 淡出 ms
+        public void SetSyncGlass(IntPtr hwnd, bool show, double x, double y, double w, double h, int ms)
+        {
+            WithTarget(hwnd, delegate(Target t, long now)
+            {
+                if (show) { t.SyncX = x; t.SyncY = y; t.SyncW = w; t.SyncH = h; }
+                t.SyncFade.Retarget(show ? 1 : 0, ms, now);
+            });
+        }
+
+        readonly LiquidGlass.Look syncLook = MakeSyncLook();
+        static LiquidGlass.Look MakeSyncLook()
+        {
+            // 照 iOS 26 的玻璃按鈕（例如「資料庫」那列的膠囊）：中間清楚透明、稍微霧白一點，
+            // 邊緣一圈很明顯的透鏡折射（後面的顏色被拉彎、帶一點色散），外緣一圈亮的高光
+            var look = LiquidGlass.Look.OnTop(1);
+            look.Refract = 0.95f;
+            look.Bevel = 14;       // 折射帶約 14 像素（膠囊半高 22）：靠邊那段整個是彎的，中間平的
+            look.CA = 0.07f;
+            look.Spec = 1.35f;     // 外緣的亮邊
+            look.Reflect = 0.35f;
+            look.Sat = 1.3f;
+            look.TintAmt = 0.12f;  // 一層很淡帶環境色調的光
+            return look;
+        }
+
+        // 同步鈕的玻璃（跟歌詞圓鈕的玻璃同一時間畫：卡片的圖貼完、歌詞貼上去之前；取樣的是已經畫好的畫面，邊緣會折射後面的東西）
+        void DrawSyncGlass(Target t)
+        {
+            long now = AnimationClock.Now;
+            if (t.SyncFade.Running(now)) redraw = true;
+            double a = t.SyncFade.Value(now);
+            if (a <= 0.001 || liquid == null || t.SyncW <= 0 || t.SyncH <= 0) return;
+            double s = t.Height / 1080.0;
+            var pill = new LiquidGlass.Shape
+            {
+                X = (float)(t.SyncX + t.SyncW / 2), Y = (float)(t.SyncY + t.SyncH / 2), HalfW = (float)(t.SyncW / 2), HalfH = (float)(t.SyncH / 2), Radius = (float)(t.SyncH / 2),
+                Appear = (float)a, Thick = 1, Mag = 1, Shadow = 0.1f, D00 = 1, D11 = 1,
+                TintR = 1, TintG = 1, TintB = 1, TintA = 0.07f,   // 稍微霧白（iOS 的玻璃按鈕比背景亮一點）
+            };
+            liquidShapes[0] = pill;
+            double pad = 56 * s;
+            int ex, ey, ew, eh;
+            Clip(t, t.SyncX - pad, t.SyncY - pad, t.SyncW + 2 * pad, t.SyncH + 2 * pad, out ex, out ey, out ew, out eh);
+            if (ew <= 0 || eh <= 0) return;
+            syncLook.Scale = (float)s;
+            liquid.DrawOnTop(t.BackBuffer, t.LiquidRtv, liquidShapes, 1, syncLook, ex, ey, ew, eh);
+        }
+
         static void ReleaseLiquid(Target t)
         {
+            FreeBackdrop(t);
             FreeSheet(t);
             FreeClockField(t);
             FreeClockOld(t);
@@ -998,6 +1072,12 @@ namespace VideoWallpaper
             {
                 clockLiquid.ReleaseScratch();
                 foreach (var other in targets) { other.ClockBlurW = other.ClockBlurH = 0; }
+            }
+            // 放大歌詞的背景模糊：沒有卡片了（鎖定畫面收起來）就還回去，畫好的背景也是
+            if (backdropLiquid != null && !card)
+            {
+                backdropLiquid.ReleaseScratch();
+                foreach (var other in targets) FreeBackdrop(other);
             }
         }
     }

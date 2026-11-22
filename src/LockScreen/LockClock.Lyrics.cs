@@ -14,19 +14,38 @@ namespace VideoWallpaper
         // centers：每一行中心在長圖上的高度；heights：每一行的高度（折成好幾列的行比較高）；
         // spacing：單行歌詞的行距（亮度遮罩、還沒開始唱時的位置用）；blurred：同一張長圖糊掉的版本（畫不出來是 null）。
         // 空的行（間奏）畫成空白：唱到那裡時由播放引擎在那一行畫三個點的動畫（見 VideoEngine.SetLyricsDots）
-        public static int[] RenderLyricsSheet(int screenHeight, List<Lyrics.Line> lines, out int width, out int height, out double[] centers, out double[] heights, out double spacing, out int[] blurred)
+        // screenHeight：字照多高的螢幕放大；boxWidth：一行多寬（像素；0 = 跟一般大小的卡片一樣寬）
+        // glyphs：放大歌詞（boxWidth > 0）每一行的字在長圖上的位置（逐字亮用）；一般大小的是 null
+        public static int[] RenderLyricsSheet(int screenHeight, int boxWidth, List<Lyrics.Line> lines, out int width, out int height, out double[] centers, out double[] heights, out double spacing, out int[] blurred, out LyricsGlyphs[] glyphs)
         {
             double s = screenHeight / 1080.0;
             double pad = ShadowPad(screenHeight);
-            double boxWidth = LyricsWidth(s), gap = Math.Round(7 * s);
+            bool stage = boxWidth > 0;   // 有指定寬度的是放大歌詞（Apple Music 全螢幕歌詞是粗體）
+            if (boxWidth <= 0) boxWidth = (int)LyricsWidth(s);
+            var weight = stage ? FontWeights.Bold : FontWeights.SemiBold;
+            double gap = Math.Round(7 * s);
             var canvas = new Canvas { Width = boxWidth };
             centers = new double[lines.Count];
             heights = new double[lines.Count];
+            glyphs = stage ? new LyricsGlyphs[lines.Count] : null;
             double next = 0;
             for (int j = 0; j < lines.Count; j++)
             {
-                var block = LyricsBlock(lines[j].Text.Length == 0 ? " " : lines[j].Text, s, boxWidth);
+                string text = lines[j].Text.Length == 0 ? " " : lines[j].Text;
+                // 放大歌詞：一行放不下的，字稍微縮小到剛好一行（最多縮到 72%），再長的才換行
+                double k = 1;
+                if (stage)
+                {
+                    double natural = LyricsNaturalWidth(text, s, weight);
+                    if (natural > boxWidth) k = Math.Max(0.72, (boxWidth - 1) / natural);
+                }
+                var block = LyricsBlock(text, s * k, boxWidth, weight);
                 double h = block.DesiredSize.Height;
+                if (stage && glyphs != null)
+                {
+                    try { glyphs[j] = Glyphs(lines[j].Text, s * k, boxWidth, weight, pad, pad + next); }
+                    catch { glyphs[j] = null; }   // 量不出來（怪字元）：這行沒有逐字亮，歌詞照常顯示
+                }
                 Canvas.SetTop(block, next);
                 canvas.Children.Add(block);
                 centers[j] = pad + next + h / 2;
@@ -34,29 +53,143 @@ namespace VideoWallpaper
                 next += h + gap;
             }
             canvas.Height = Math.Max(1, next - gap);
-            spacing = LyricsBlock("A", s, boxWidth).DesiredSize.Height + gap;
+            spacing = LyricsBlock("A", s, boxWidth, weight).DesiredSize.Height + gap;
             Border root;
-            canvas.Effect = Halo(s);   // 在卡片的玻璃裡：跟卡片上的字一樣只有很淡的柔光（不加陰影）
+            // 字先不加效果畫出來；柔光和糊掉的版本自己算（WPF 的效果畫成圖時是一格一格用 CPU 算的，
+            // 放大歌詞的長圖有一千多萬個點，加效果要畫十秒左右；自己用多執行緒的方框模糊算不到一秒）
             var pixels = ToPixels(canvas, s, pad, out root, out width, out height, false);
-            // 糊掉的版本：整張（連陰影）再糊一次。很長的歌、顯示卡的效果做不出來就不要（歌詞照樣顯示，只是不糊）
+            // 柔光：跟卡片上的字一樣很淡（Halo：黑、半徑 8、22%），墊在字的下面
+            AddHalo(pixels, width, height, Math.Max(1, (int)Math.Round(8 * s / 3)), 0.22);
+            // 糊掉的版本：整張（連柔光）再糊一次（半徑 7）。記憶體不夠之類的就不要（歌詞照樣顯示，只是不糊）
             blurred = null;
-            try
-            {
-                root.Effect = new System.Windows.Media.Effects.BlurEffect { Radius = 7 * s, KernelType = System.Windows.Media.Effects.KernelType.Gaussian };
-                var holder = new Border { Child = root };
-                holder.Measure(new Size(width, height));
-                holder.Arrange(new Rect(0, 0, width, height));
-                blurred = Snapshot(holder, width, height);
-            }
+            try { blurred = Blurred(pixels, width, height, Math.Max(1, (int)Math.Round(7 * s / 3))); }
             catch { blurred = null; }
             return pixels;
         }
 
-        static TextBlock LyricsBlock(string text, double s, double width)
+        // 方框模糊連做三次（很接近高斯模糊；r 大約是高斯半徑的三分之一）：a 是一個通道（0～255），tmp 是一樣大的暫存。
+        // 一列一列、一行一行各自獨立，分給多個執行緒做
+        static void BoxBlur3(byte[] a, byte[] tmp, int w, int h, int r)
+        {
+            int win = 2 * r + 1;
+            for (int pass = 0; pass < 3; pass++)
+            {
+                System.Threading.Tasks.Parallel.For(0, h, y =>
+                {
+                    int row = y * w, sum = 0;
+                    for (int i = -r; i <= r; i++) sum += a[row + Math.Max(0, Math.Min(w - 1, i))];
+                    for (int x = 0; x < w; x++)
+                    {
+                        tmp[row + x] = (byte)(sum / win);
+                        sum += a[row + Math.Min(w - 1, x + r + 1)] - a[row + Math.Max(0, x - r)];
+                    }
+                });
+                System.Threading.Tasks.Parallel.For(0, w, x =>
+                {
+                    int sum = 0;
+                    for (int i = -r; i <= r; i++) sum += tmp[Math.Max(0, Math.Min(h - 1, i)) * w + x];
+                    for (int y = 0; y < h; y++)
+                    {
+                        a[y * w + x] = (byte)(sum / win);
+                        sum += tmp[Math.Min(h - 1, y + r + 1) * w + x] - tmp[Math.Max(0, y - r) * w + x];
+                    }
+                });
+            }
+        }
+
+        // 黑色的柔光墊在字的下面（圖是預乘透明度的 BGRA）：柔光的透明度 = 字的透明度糊開 × opacity
+        static void AddHalo(int[] px, int w, int h, int r, double opacity)
+        {
+            int n = px.Length;
+            var a = new byte[n];
+            for (int i = 0; i < n; i++) a[i] = (byte)((uint)px[i] >> 24);
+            BoxBlur3(a, new byte[n], w, h, r);
+            int k = (int)Math.Round(opacity * 256);
+            for (int i = 0; i < n; i++)
+            {
+                int ta = (int)((uint)px[i] >> 24), sa = a[i] * k >> 8;
+                int oa = ta + (255 - ta) * sa / 255;   // 黑色：顏色不用動（預乘），只有透明度變
+                px[i] = (px[i] & 0x00FFFFFF) | (oa << 24);
+            }
+        }
+
+        // 整張圖糊掉的版本（四個通道各自糊，預乘透明度的圖直接糊就對了）
+        static int[] Blurred(int[] px, int w, int h, int r)
+        {
+            int n = px.Length;
+            var result = new int[n];
+            var ch = new byte[n];
+            var tmp = new byte[n];
+            for (int c = 0; c < 4; c++)
+            {
+                int shift = 8 * c;
+                for (int i = 0; i < n; i++) ch[i] = (byte)((uint)px[i] >> shift);
+                BoxBlur3(ch, tmp, w, h, r);
+                for (int i = 0; i < n; i++) result[i] |= ch[i] << shift;
+            }
+            return result;
+        }
+
+        // 放大歌詞一行裡每個字在長圖上的位置（逐字亮用）：Rows 是這行每一列（折行）的上下緣（長圖的列，兩個一組）；
+        // Text 的每個 UTF-16 字元在第幾列（CharRow；-1 = 沒有寬度：代理對的後半、換行處的空白）、左右（X0、X1，長圖的 x）
+        public class LyricsGlyphs
+        {
+            public float[] Rows;
+            public int[] CharRow;
+            public float[] X0, X1;
+        }
+
+        // 照跟 LyricsBlock 一樣的字型、大小、寬度排一次版，量每個字的位置；(left, top) 是這行在長圖上的左上角
+        static LyricsGlyphs Glyphs(string text, double s, double width, FontWeight weight, double left, double top)
+        {
+            if (string.IsNullOrEmpty(text)) return null;
+            var family = weight == FontWeights.Bold ? BigLyricsFont : LyricsFont;
+            var ft = new FormattedText(text, System.Globalization.CultureInfo.GetCultureInfo("en-us"), FlowDirection.LeftToRight,
+                new Typeface(family, FontStyles.Normal, weight, FontStretches.Normal), Math.Round(20 * s), Brushes.White);
+            ft.MaxTextWidth = width;
+            ft.TextAlignment = TextAlignment.Left;
+            var g = new LyricsGlyphs { CharRow = new int[text.Length], X0 = new float[text.Length], X1 = new float[text.Length] };
+            var tops = new List<double>();
+            var bottoms = new List<double>();
+            for (int i = 0; i < text.Length; i++)
+            {
+                g.CharRow[i] = -1;
+                if (char.IsLowSurrogate(text[i])) continue;
+                int count = char.IsHighSurrogate(text[i]) && i + 1 < text.Length ? 2 : 1;
+                var geo = ft.BuildHighlightGeometry(new Point(0, 0), i, count);
+                if (geo == null) continue;
+                var b = geo.Bounds;
+                if (b.IsEmpty || b.Width <= 0) continue;
+                // 第幾列：上下範圍跟哪一列重疊就是那一列（中英混排時備援字型的字高度可能不一樣，不能只比上緣）
+                int row = -1;
+                for (int r = 0; r < tops.Count; r++) if (b.Top < bottoms[r] - 1 && b.Bottom > tops[r] + 1) { row = r; break; }
+                if (row < 0) { tops.Add(b.Top); bottoms.Add(b.Bottom); row = tops.Count - 1; }
+                else { tops[row] = Math.Min(tops[row], b.Top); bottoms[row] = Math.Max(bottoms[row], b.Bottom); }
+                g.CharRow[i] = row;
+                g.X0[i] = (float)(left + b.Left);
+                g.X1[i] = (float)(left + b.Right);
+            }
+            if (tops.Count == 0) return null;
+            g.Rows = new float[tops.Count * 2];
+            for (int r = 0; r < tops.Count; r++) { g.Rows[2 * r] = (float)(top + tops[r]); g.Rows[2 * r + 1] = (float)(top + bottoms[r]); }
+            return g;
+        }
+
+        // 這行歌詞不換行時有多寬
+        static double LyricsNaturalWidth(string text, double s, FontWeight weight)
+        {
+            var block = LyricsBlock(text, s, 100000, weight);
+            block.TextWrapping = TextWrapping.NoWrap;
+            block.Width = double.NaN;
+            block.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            return block.DesiredSize.Width;
+        }
+
+        static TextBlock LyricsBlock(string text, double s, double width, FontWeight weight)
         {
             var block = new TextBlock
             {
-                Text = text, FontFamily = LyricsFont, FontSize = Math.Round(20 * s), FontWeight = FontWeights.SemiBold, Foreground = Brushes.White,
+                Text = text, FontFamily = weight == FontWeights.Bold ? BigLyricsFont : LyricsFont, FontSize = Math.Round(20 * s), FontWeight = weight, Foreground = Brushes.White,
                 TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Left, Width = width,
             };
             TextOptions.SetTextFormattingMode(block, TextFormattingMode.Ideal);
@@ -134,6 +267,13 @@ namespace VideoWallpaper
         // 還沒唱到的行（下面）比唱過的（上面）亮一點（Apple Music 的樣子；下面一直有字，才跟卡片的內容接成一塊）。
         // 糊的程度很快就到底：清楚和糊掉兩張疊在一起（看起來有重影）的範圍短一點
         static readonly double[] ShadeLevels = { 1.0, 0.42, 0.28, 0.14, 0 }, UpcomingLevels = { 1.0, 0.5, 0.38, 0.26, 0.14 }, BlurLevels = { 0, 0.55, 0.9, 1, 1 };
+        // 放大歌詞時自己捲（挑要跳到哪一行）：每一行都看得清楚，正在唱的那行最亮
+        static readonly double[] BrowseLevels = { 1.0, 0.55, 0.5 };
+
+        public static float[] LyricsBrowseShade(int sheetHeight, double[] centers, double[] heights, double spacing, int line)
+        {
+            return PerLine(sheetHeight, centers, heights, spacing, line, BrowseLevels, BrowseLevels);
+        }
 
         // 長圖每一列照「離目前這行幾行」查 levels（行和行之間的空隙慢慢過渡）
         // （levels 是目前這行上面、唱過的行；upcoming 是下面還沒唱到的）

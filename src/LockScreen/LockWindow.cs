@@ -14,6 +14,9 @@ namespace VideoWallpaper
         public Action Drop;                  // 放開左鍵
         public Func<bool> Press;             // 左鍵按在按鈕、卡片以外：回傳 true = 接手（可能要拖頁面，放開時沒拖動才算點一下）
         public Action LyricsKey;             // L：打開 / 關掉歌詞
+        public Action ZoomKey;               // F：放大 / 縮回歌詞（歌詞開著時）
+        public Action Moved;                 // 滑鼠真的動了（不是視窗移動造成的）
+        public Action<int> Wheel;            // 滾輪（參數：往上滾是正的，一格 120）
         public System.Drawing.Rectangle Bounds { get; private set; }
         bool dragging;
 
@@ -94,6 +97,7 @@ namespace VideoWallpaper
                         lastPos = p;
                         LastMove = DateTime.Now;
                         if (!CursorShown) { CursorShown = true; Native.SetCursor(Arrow); }
+                        if (Moved != null) Moved();
                     }
                     long mp = m.LParam.ToInt64();
                     int mx = (short)(mp & 0xFFFF), my = (short)((mp >> 16) & 0xFFFF);
@@ -109,6 +113,7 @@ namespace VideoWallpaper
                 case 0x0100:   // WM_KEYDOWN：空白鍵 / Enter / Esc 滑走；L 打開 / 關掉歌詞（按住不放的自動重複不算）
                     int key = m.WParam.ToInt32();
                     if (key == 0x4C) { if ((m.LParam.ToInt64() & 0x40000000) == 0 && LyricsKey != null) LyricsKey(); return; }
+                    if (key == 0x46) { if ((m.LParam.ToInt64() & 0x40000000) == 0 && ZoomKey != null) ZoomKey(); return; }
                     if ((key == 0x20 || key == 0x0D || key == 0x1B) && Dismiss != null) Dismiss();
                     return;
                 case 0x0201:   // 滑鼠左鍵：點到卡片上的按鈕就控制播放器；其他地方可以往上拖走頁面（Press），沒有接 Press 的話就滑走
@@ -117,11 +122,16 @@ namespace VideoWallpaper
                     if (Press != null && Press()) return;
                     if (Dismiss != null) Dismiss();
                     return;
+                case 0x020A:   // WM_MOUSEWHEEL：放大歌詞時捲歌詞
+                    if (Wheel != null) Wheel((short)((m.WParam.ToInt64() >> 16) & 0xFFFF));
+                    m.Result = IntPtr.Zero;
+                    return;
                 case 0x0204: case 0x0207:   // 滑鼠右鍵 / 中鍵
                     if (Dismiss != null) Dismiss();
                     return;
                 case 0x0312:   // WM_HOTKEY：鎖定畫面顯示時登記的空白鍵 / Enter / Esc / L（不管前景在哪個視窗都收得到；登記編號就是按鍵代碼）
                     if (m.WParam.ToInt32() == 0x4C) { if (LyricsKey != null) LyricsKey(); return; }
+                    if (m.WParam.ToInt32() == 0x46) { if (ZoomKey != null) ZoomKey(); return; }
                     if (Dismiss != null) Dismiss();
                     return;
                 case 0x001C:   // WM_ACTIVATEAPP：被切到別的程式（Alt+Tab、Win 鍵、Ctrl+Alt+Del…）；lParam 是切過去的那個程式的執行緒

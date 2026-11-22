@@ -118,18 +118,45 @@ namespace VideoWallpaper
         // 開始每秒讀一次；有變化時在 UI 執行緒呼叫 onChanged
         public static void Start(Action onChanged)
         {
-            lock (gate) stopped = false;
             var ui = Dispatcher.CurrentDispatcher;
-            changed = delegate { ui.BeginInvoke(onChanged); };
-            if (timer == null) timer = new System.Threading.Timer(delegate { Poll(); }, null, 0, 1000);
-            else timer.Change(0, 1000);
+            lock (gate)
+            {
+                stopped = false; shown = true;
+                changed = delegate { ui.BeginInvoke(onChanged); };
+                Run();
+            }
         }
 
-        // 鎖定畫面收起來：停止讀取，也忘掉上一首（下次打開時才不會先畫舊的歌、再翻頁換成現在的）
+        // 鎖定畫面收起來：停止讀取，也忘掉上一首（下次打開時才不會先畫舊的歌、再翻頁換成現在的）。
+        // 有人要在背景一直讀（見 Background）的話照樣讀，只是不再通知鎖定畫面
         public static void Stop()
         {
-            if (timer != null) timer.Change(Timeout.Infinite, Timeout.Infinite);
-            lock (gate) { stopped = true; current = null; }
+            lock (gate)
+            {
+                shown = false; changed = null;
+                if (background) return;
+                stopped = true; current = null;
+                if (timer != null) timer.Change(Timeout.Infinite, Timeout.Infinite);
+            }
+        }
+
+        // 鎖定畫面沒開也一直讀（src\Private 才有用到）
+        public static void Background(bool on)
+        {
+            lock (gate)
+            {
+                background = on;
+                if (on) { stopped = false; Run(); }
+                else if (!shown) { stopped = true; current = null; if (timer != null) timer.Change(Timeout.Infinite, Timeout.Infinite); }
+            }
+        }
+
+        static bool shown, background;   // 鎖定畫面在讀、背景在讀（gate 鎖著時讀寫）
+
+        static void Run()
+        {
+            if (timer == null) timer = new System.Threading.Timer(delegate { Poll(); }, null, 0, 1000);
+            else timer.Change(0, 1000);
         }
 
         // 最近一次按的是哪個按鈕、什麼時候按的（換歌動畫用來決定往哪邊滑）
@@ -370,13 +397,15 @@ namespace VideoWallpaper
                 }
 
                 string oldKey;
+                Action notify;
                 lock (gate)
                 {
                     if (stopped) return;   // 讀的途中鎖定畫面收起來了：不要把這首寫回去（下次打開才不會先畫舊的）
                     oldKey = current == null ? null : current.Key;
                     current = track;
+                    notify = changed;      // 鎖定畫面沒開（只有背景在讀）是 null
                 }
-                if (oldKey != (track == null ? null : track.Key) && changed != null) changed();
+                if (oldKey != (track == null ? null : track.Key) && notify != null) notify();
             }
             catch { }
             finally

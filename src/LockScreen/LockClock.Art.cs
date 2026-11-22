@@ -33,7 +33,7 @@ namespace VideoWallpaper
         // 跟卡片一樣是連續曲率的圓角（見 SmoothRect）；底下淡淡的影子（往下 2、很柔）。沒有封面：半透明方塊和音符
         static int[] RenderCover(MusicCard card, BitmapSource art)
         {
-            double s = card.Scale, size = Math.Round(ArtSize * s), radius = Math.Max(4 * s, card.Radius - CardPad * s);
+            double s = card.Scale, size = Math.Round(ArtSize * s), radius = Math.Max(4 * s, CardRadius(s) - CardPad * s);   // 封面照一般卡片的圓角算（放大歌詞時卡片的圓角放大了，封面不跟著變得太圓）
             var image = new Border { Width = size, Height = size, Clip = SmoothRect(new Rect(0, 0, size, size), radius) };
             // 影子加在外面一層（裡面那層被切成圓角，影子才會照著圓角的形狀）
             var holder = new Border
@@ -171,6 +171,52 @@ namespace VideoWallpaper
         public class CardColor
         {
             public int[] Glow;
+        }
+
+        // 螢幕四邊的一條光（放大歌詞時節奏、換歌的光改在螢幕邊緣，不在膠囊上）：上、下、左、右四張，合起來是一圈，角落不會重疊變亮
+        public class EdgeStrip
+        {
+            public int[] Pixels;
+            public int X, Y, W, H;
+        }
+
+        static string edgeKey;
+        static EdgeStrip[] edgeCache;
+
+        // 顏色跟卡片的光暈一樣（左上到右下是封面的兩個顏色），從螢幕邊緣往內慢慢淡掉（約 45 像素 @1080p 衰減一半多）；
+        // 同樣的顏色、大小直接用上次的（不用每次重算）
+        static EdgeStrip[] RenderEdgeGlow(double[] hues, int sw, int sh, double s)
+        {
+            string key = string.Join(",", Array.ConvertAll(hues, v => v.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture))) + "|" + sw + "x" + sh;
+            if (key == edgeKey && edgeCache != null) return edgeCache;
+            double sat1 = Math.Max(0.35, Math.Min(0.8, hues[1] * 0.9)), sat2 = Math.Max(0.35, Math.Min(0.8, hues[3] * 0.9));
+            bool two = hues.Length > 4 && hues[4] > 0;
+            Color c0 = two ? Hsl(hues[0], Math.Max(0.6, sat1), 0.62, 255) : Hsl(hues[2], Math.Max(0.6, sat2), 0.62, 255);
+            Color c1 = two ? Hsl(hues[2], Math.Max(0.6, sat2), 0.62, 255) : Hsl(hues[0], Math.Max(0.6, sat1), 0.62, 255);
+            double sigma = 45 * s;
+            int band = Math.Max(4, Math.Min((int)Math.Ceiling(sigma * 4), Math.Min(sw, sh) / 3));
+            var rects = new[] { new[] { 0, 0, sw, band }, new[] { 0, sh - band, sw, band }, new[] { 0, band, band, sh - 2 * band }, new[] { sw - band, band, band, sh - 2 * band } };
+            var strips = new EdgeStrip[4];
+            for (int r = 0; r < 4; r++)
+            {
+                int x0 = rects[r][0], y0 = rects[r][1], w = rects[r][2], h = rects[r][3];
+                var px = new int[Math.Max(1, w * h)];
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                    {
+                        int gx = x0 + x, gy = y0 + y;
+                        double d = Math.Min(Math.Min(gx, gy), Math.Min(sw - 1 - gx, sh - 1 - gy));
+                        double fall = Math.Max(0, 1 - d / band);
+                        double a = 0.85 * Math.Exp(-d / sigma) * fall * fall;
+                        if (a < 1 / 255.0) continue;
+                        double t = ((double)gx / sw + (double)gy / sh) / 2;
+                        double cr = c0.R + (c1.R - c0.R) * t, cg = c0.G + (c1.G - c0.G) * t, cb = c0.B + (c1.B - c0.B) * t;
+                        px[y * w + x] = ((int)Math.Round(a * 255) << 24) | ((int)Math.Round(cr * a) << 16) | ((int)Math.Round(cg * a) << 8) | (int)Math.Round(cb * a);   // 預乘 alpha
+                    }
+                strips[r] = new EdgeStrip { Pixels = px, X = x0, Y = y0, W = Math.Max(1, w), H = Math.Max(1, h) };
+            }
+            edgeKey = key; edgeCache = strips;
+            return strips;
         }
 
         // 光暈：邊框整圈泛出柔和的光，顏色從左上到右下跟著封面的兩個顏色（兩個色系就各佔一角，一個色系就是相近的兩個色相），
